@@ -1,0 +1,817 @@
+---
+title: "Differential abundance for time of collection (antibiotic therapy days at sampling collect)"
+author: "Rafaela Ramalho Guerra"
+date: "`r Sys.Date()`"
+---
+
+# 0 - Study description
+Data for this analysis is from the project 'INTEGRATION OF OMIC TECHNIQUES IN THE IDENTIFICATION AND CHARACTERIZATION OF MICROBIAL AND PROTEIN BIOMARKERS IN PATIENTS WITH SEPSIS', ethics approval 58576722.2.0000.5327, Hospital de Clínicas de Porto Alegre (HCPA). The bioinformatics analyses were performed in the Bioinformatics Core of HCPA. This document presents the microbiome analysis workflow for this project.
+
+In this analysis, we included 89 fecal samples from patients admitted to HCPA with symptoms of SIRS. The patients were categorized into sepsis (n = 38) and no_sepsis (n = 51) groups. The gut microbiome of sepsis patients was compared with that of SIRS patients.
+
+The variables presented in metadata table are:
+#Outcome: Patient outcome (sepsis or no_sepsis)  
+#Collection_time: Time point of sample collection during antibiotic therapy  
+#ATB_therapy: Total number of days on antibiotics during admission  
+#Stay_days: Length of hospital stay (admission duration)  
+#Outcome_30_days: 30-day mortality (alive or deceased)  
+#Collection_time_category: Sample collected before or after the 5th day of antibiotic therapy
+#diff_class: Combination of betacltam + other antibiotic class  
+
+
+# 0.1 Subset Before 5th days of antibiotic therapy and After 5th days of antibiotic therapy
+```{r tsc_data_prep_subset_time, eval=T, echo=F}
+
+ps <- readRDS("ps1.ATB.no.rds")
+metadata <- sample_data(ps)
+
+ps_ATB_after <- subset_samples(ps, Collection_time_category == "After_5_days")
+
+saveRDS(ps_ATB_after, file = "ps1.ATB.after.rds")
+
+
+#cheking
+
+ps_ATB_after <- readRDS("ps1.ATB.after.rds")
+metadata_after <- sample_data(ps_ATB_after)
+
+########################################################
+ps_ATB_before <- subset_samples(ps, Collection_time_category == "Before_5_days")
+
+saveRDS(ps_ATB_before, file = "ps1.ATB.before.rds")
+
+#cheking
+
+ps_ATB_before <- readRDS("ps1.ATB.before.rds")
+metadata_before <- sample_data(ps_ATB_before)
+
+
+metadata_after$Outcome <- factor(metadata_after$Outcome, levels = c("no_sepsis", "sepsis"))
+sample_data(ps_ATB_after) <- metadata_after
+metadata_before$Outcome <- factor(metadata_before$Outcome, levels = c("no_sepsis", "sepsis"))
+#metadata_before$diff_class <- factor(metadata_before$diff_class, levels = c("no", "yes")) #não sei se aqui precisa de uma ref
+sample_data(ps_ATB_before) <- metadata_before
+
+```
+
+
+## 1.0 Analysis of Compositions of Microbiomes with Bias Correction 2(ANCOMBC2)
+We are using ANCOMBC2 for differential abundance analysis
+We performed the differential abundance analysis at genus level with ANCOMBC2
+## 1.1 Run ANCOMBC2 All patients
+```{r ANCOMBC2_all, eval=TRUE, echo=FALSE}
+# Atualizações frequentes e mudanças no algoritmo, incluindo no output. Revisar antes de usar!
+path <- '/home/local.hcpa.ufrgs.br/rrguerra/ATB'
+Dif_abundance_new = paste(path,"/Differential_abundance_new/",sep = "")
+dir.create(Dif_abundance_new)
+set.seed(123)
+
+output_genus = ancombc2(data = ps, assay_name = "counts", tax_level = "Genus", #tax_level - aglomeração taxonômica
+                  fix_formula = "Outcome + Age + Sex + Collection_time + diff_class", rand_formula = NULL, #fix_formula - modelar as co-variáveis
+                  p_adj_method = "BH", pseudo_sens = TRUE,
+                  prv_cut = 0.1, lib_cut = 1000, s0_perc = 0.05, #prv_cut - ponto de corte de prevalência 
+                  group = "Outcome", struc_zero = TRUE, neg_lb = TRUE, #group - variável primária
+                  alpha = 0.05, n_cl = 20, verbose = TRUE,
+                  global = TRUE, pairwise = TRUE, dunnet = TRUE, trend = FALSE, #Tipo de análise
+                  iter_control = list(tol = 1e-2, max_iter = 20, 
+                                      verbose = TRUE),
+                  em_control = list(tol = 1e-5, max_iter = 100),
+                  lme_control = lme4::lmerControl(),
+                  mdfdr_control = list(fwer_ctrl_method = "holm", B = 100))
+```
+
+## 1.2 Differential abundance by time unit - Figure 1
+```{r ANCOMBC2_collection_time_all, eval=T, echo=F,message=F, warning=F, fig.cap='Figure 1: Differential abundance (ANCOM-BC2) – taxa significant in any group along time unit', fig.align='center', fig.width=5, fig.height=8}
+
+res_prim_all = output_genus$res
+
+
+df_time_all <- res_prim_all %>%
+    select(taxon, contains("Collection_time"))
+
+
+df_fig_time_all <- df_time_all %>%
+    filter(diff_Collection_time == 1) %>%
+    arrange(desc(lfc_Collection_time)) %>%
+    mutate(direct = ifelse(lfc_Collection_time > 0, "Positive LFC", "Negative LFC"),
+           color = ifelse(passed_ss_Collection_time == 1, "aquamarine3", "black"))
+
+
+df_fig_time_all$taxon <- factor(df_fig_time_all$taxon, levels = df_fig_time_all$taxon)
+
+
+df_fig_time_all$direct <- factor(df_fig_time_all$direct, 
+                                     levels = c("Positive LFC", "Negative LFC"))
+
+
+# Top 10
+df_fig_time_all_top <- df_fig_time_all %>%
+  filter(!is.na(lfc_Collection_time)) %>%
+  group_by(direct) %>%
+  slice_max(order_by = abs(lfc_Collection_time), n = 10, with_ties = FALSE) %>%
+  ungroup() %>%
+  arrange(desc(lfc_Collection_time))  # Opcional: Organizar positivos primeiro
+
+df_fig_time_all_top$taxon <- factor(df_fig_time_all_top$taxon, levels = df_fig_time_all_top$taxon)
+
+# Plot
+fig_time_all <- df_fig_time_all_top %>%
+    ggplot(aes(x = taxon, y = lfc_Collection_time, fill = direct)) + 
+    geom_bar(stat = "identity", width = 0.7, color = "black", 
+             position = position_dodge(width = 0.4)) +
+    geom_errorbar(aes(ymin = lfc_Collection_time - se_Collection_time, 
+                      ymax = lfc_Collection_time + se_Collection_time), 
+                  width = 0.2, position = position_dodge(0.05), color = "gray30") + 
+    labs(x = NULL, y = "Log fold change", 
+         title = "Log fold changes as one unit increase of Collection time") + 
+    scale_fill_manual(name = NULL, values = c("Positive LFC" = "darkslategray3", "Negative LFC" = "coral")) +
+    theme_bw() + 
+    theme(plot.title = element_text(hjust = 0.5),
+          panel.grid.minor.y = element_blank(),
+          axis.text.x = element_text(angle = 60, hjust = 1, face = 'italic', color = "gray30")
+    )
+
+```
+
+############################################################################################################################################
+
+## We separated the patients into subsets according to the time of collection and exposure to antibiotic therapy (before and after the 5th day of therapy).
+## 2.0 Run ANCOMBC2 Before 5th days of antibiotictherapy
+```{r ANCOMBC2_before, eval=TRUE, echo=FALSE}
+# Atualizações frequentes e mudanças no algoritmo, incluindo no output. Revisar antes de usar!
+path <- '/home/local.hcpa.ufrgs.br/rrguerra/ATB'
+Dif_abundance_new = paste(path,"/Differential_abundance_new/",sep = "")
+dir.create(Dif_abundance_new)
+set.seed(123)
+
+output_genus_before = ancombc2(data = ps_ATB_before, assay_name = "counts", tax_level = "Genus", #tax_level - aglomeração taxonômica
+                  fix_formula = "Outcome + Age + Sex + Collection_time + diff_class", rand_formula = NULL, #fix_formula - modelar as co-variáveis
+                  p_adj_method = "BH", pseudo_sens = TRUE,
+                  prv_cut = 0.1, lib_cut = 1000, s0_perc = 0.05, #prv_cut - ponto de corte de prevalência 
+                  group = "Outcome", struc_zero = TRUE, neg_lb = TRUE, #group - variável primária
+                  alpha = 0.05, n_cl = 20, verbose = TRUE,
+                  global = TRUE, pairwise = TRUE, dunnet = TRUE, trend = FALSE, #Tipo de análise
+                  iter_control = list(tol = 1e-2, max_iter = 20, 
+                                      verbose = TRUE),
+                  em_control = list(tol = 1e-5, max_iter = 100),
+                  lme_control = lme4::lmerControl(),
+                  mdfdr_control = list(fwer_ctrl_method = "holm", B = 100))
+
+# clean environment
+#rm(list = ls(all = TRUE))
+```
+
+### 2.1 Genus level before
+#### Structural zeros before
+```{r struc_zeros_before, eval=T, echo=F}
+tab_zero = output_genus_before$zero_ind
+tab_zero %>%
+    datatable(caption = "The detection of structural zeros on Genus level all samples - before 5th days")
+FileName <- paste(Dif_abundance_new,"/Structural_zeros_genus_all_samples_before_5th_days.xlsx", sep = "")
+write_xlsx(tab_zero, FileName)
+```
+
+#### 2.2 Differential abundance by time unit -  Before 5th days subset - Figure 2
+```{r ANCOMBC2_time_before, eval=T, echo=F,message=F, warning=F, fig.cap='Differential abundance (ANCOM-BC2) – taxa significant in any group along time unit - Before 5th days subset', fig.align='center', fig.width=5, fig.height=8}
+
+
+res_prim_before = output_genus_before$res
+
+
+#LFC for time 'Collection_time'
+df_time_before <- res_prim_before %>%
+    select(taxon, contains("Collection_time"))
+
+
+df_fig_time_before <- df_time_before %>%
+    filter(diff_Collection_time == 1) %>%
+    arrange(desc(lfc_Collection_time)) %>%
+    mutate(direct = ifelse(lfc_Collection_time > 0, "Positive LFC", "Negative LFC"),
+           color = ifelse(passed_ss_Collection_time == 1, "aquamarine3", "black"))
+
+
+df_fig_time_before$taxon <- factor(df_fig_time_before$taxon, levels = df_fig_time_before$taxon)
+
+
+df_fig_time_before$direct <- factor(df_fig_time_before$direct,
+                                     levels = c("Positive LFC", "Negative LFC"))
+
+
+fig_time_before <- df_fig_time_before %>%
+    ggplot(aes(x = taxon, y = lfc_Collection_time, fill = direct)) +
+    geom_bar(stat = "identity", width = 0.7, color = "black",
+             position = position_dodge(width = 0.4)) +
+    geom_errorbar(aes(ymin = lfc_Collection_time - se_Collection_time,
+                      ymax = lfc_Collection_time + se_Collection_time),
+                  width = 0.2, position = position_dodge(0.05), color = "black") +
+    labs(x = NULL, y = "Log fold change",
+         title = "Log fold changes as one unit increase of Collection time") +
+    scale_fill_manual(name = NULL, values = c("Positive LFC" = "darkslategray3", "Negative LFC" = "coral")) +
+    theme_bw() +
+    theme(plot.title = element_text(hjust = 0.5),
+          panel.grid.minor.y = element_blank(),
+          axis.text.x = element_text(angle = 60, hjust = 1, face = 'italic',
+                                     color = df_fig_time_before$color))
+
+################################################################################################################################
+# Top 10 
+df_fig_time_before_top <- df_fig_time_before %>%
+  filter(!is.na(lfc_Collection_time)) %>%
+  group_by(direct) %>%
+  slice_max(order_by = abs(lfc_Collection_time), n = 10, with_ties = FALSE) %>%
+  ungroup() %>%
+  arrange(desc(lfc_Collection_time))  # Opcional: Organizar positivos primeiro
+
+df_fig_time_before_top$taxon <- factor(df_fig_time_before_top$taxon, levels = df_fig_time_before_top$taxon)
+
+# plot for top 10
+fig_time_before <- df_fig_time_before_top %>%
+    ggplot(aes(x = taxon, y = lfc_Collection_time, fill = direct)) +
+    geom_bar(stat = "identity", width = 0.7, color = "black",
+             position = position_dodge(width = 0.4)) +
+    geom_errorbar(aes(ymin = lfc_Collection_time - se_Collection_time,
+                      ymax = lfc_Collection_time + se_Collection_time),
+                  width = 0.2, position = position_dodge(0.05), color = "gray30") +
+    labs(x = NULL, y = "Log fold change",
+         title = "Log fold changes as one unit increase of Collection time") +
+    scale_fill_manual(name = NULL, values = c("Positive LFC" = "darkslategray3", "Negative LFC" = "coral")) +
+    theme_bw() +
+    theme(plot.title = element_text(hjust = 0.5),
+          panel.grid.minor.y = element_blank(),
+          axis.text.x = element_text(angle = 60, hjust = 1, face = 'italic', color = "gray30")
+    )
+
+```
+
+
+#### 2.3 Primary analysis for Outcome (sepsis vs. no_sepsis) -  Before 5th days - Figure 2
+```{r ANCOMBC2_prim_before, eval=T, echo=F,message=F, warning=F, fig.cap='Figure 2: Differential abundance (ANCOM-BC2) – taxa significant in sepsis group - Before 5th days', fig.align='center', fig.width=5, fig.height=8}
+
+
+res_prim_before = output_genus_before$res
+
+#Outcome
+df_fig_outcome1_before = res_prim_before %>%
+  dplyr::filter(diff_Outcomesepsis == 1) %>%
+  dplyr::mutate(lfc1 = ifelse(diff_Outcomesepsis == 1, 
+                              round(lfc_Outcomesepsis, 2), 0)) %>%
+  tidyr::pivot_longer(cols = lfc1, 
+                      names_to = "Outcome", values_to = "value") %>%
+  dplyr::arrange(taxon)
+
+df_fig_outcome2_before = res_prim_before %>%
+  dplyr::filter(diff_Outcomesepsis == 1) %>%
+  dplyr::mutate(lfc1 = ifelse(passed_ss_Outcomesepsis == 1 & diff_Outcomesepsis == 1, 
+                              "aquamarine3", "black")) %>%
+  tidyr::pivot_longer(cols = lfc1, 
+                      names_to = "Outcome", values_to = "color") %>%
+  dplyr::arrange(taxon)
+
+df_fig_outcome_before = df_fig_outcome1_before %>%
+  dplyr::left_join(df_fig_outcome2_before, by = c("taxon", "Outcome"))
+
+
+
+df_fig_outcome_before$Outcome <- recode(df_fig_outcome_before$Outcome, 
+                               "lfc1" = "Outcome - sepsis")
+
+###########################################################################################################################
+# Top 10
+top_10_genera_outcome_before <- df_fig_outcome_before %>%
+  arrange(desc(abs(value))) %>%  # Sort by absolute log fold change
+  slice(1:10)  # Select the top 10
+
+# Plot
+F2_outcome_before = top_10_genera_outcome_before %>%
+  ggplot(aes(y = reorder(taxon, abs(value)), x = value, 
+             fill = ifelse(value >= 0, "Positive LFC", "Negative LFC"))) +
+  geom_bar(stat = "identity", width = 0.8, color = "black") +
+  labs(y = "", x = "Abundance", title = "") +
+  scale_fill_manual(values = c("Positive LFC" = "darkslategray3", "Negative LFC" = "coral"),
+                    name = "") +
+  scale_y_discrete(expand = expansion(mult = c(0.08 , 0.08))) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0),
+        axis.text.y = element_text(face = "italic", size = 10),  # Italicize taxon names
+        axis.text.x = element_text(size = 10),
+        strip.text.x = element_text(size = 10),
+        plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "lines"))
+
+```
+#In patients with sepsis, we observed that at the beginning of antimicrobial therapy, there was a decrease in the genus Anaerobutyricum and an increase in Holdemania. Anaerobutyricum appears to be little influenced by time and combination of antimicrobials, since they were initially observed in this group of patients and not in subsequent analyses. This genus may be related to the pathophysiology of patients with sepsis.
+
+
+#### 2.4 Primary analysis for Betalactam combined with other class antibiotics vs. Betalactam only -  Before 5th days - Figure 3
+```{r ANCOMBC2_class_before, eval=T, echo=F,message=F, warning=F, fig.cap='Figure 3: Differential abundance (ANCOM-BC2) – taxa significant in Betalactam combined with other class antibiotics vs. Betalactam only - Before 5th days', fig.align='center', fig.width=5, fig.height=8}
+
+df_fig_class1_before = res_prim_before %>%
+  dplyr::filter(diff_diff_classyes == 1) %>%
+  dplyr::mutate(lfc1 = ifelse(diff_diff_classyes == 1, 
+                              round(lfc_diff_classyes, 2), 0)) %>%
+  tidyr::pivot_longer(cols = lfc1, 
+                      names_to = "diff_class", values_to = "value") %>%
+  dplyr::arrange(taxon)
+
+df_fig_class2_before = res_prim_before %>%
+  dplyr::filter(diff_diff_classyes == 1) %>%
+  dplyr::mutate(lfc1 = ifelse(passed_ss_diff_classyes == 1 & diff_diff_classyes == 1, 
+                              "aquamarine3", "black")) %>%
+  tidyr::pivot_longer(cols = lfc1, 
+                      names_to = "diff_class", values_to = "color") %>%
+  dplyr::arrange(taxon)
+
+df_fig_class_before = df_fig_class1_before %>%
+  dplyr::left_join(df_fig_class2_before, by = c("taxon", "diff_class"))
+
+
+
+df_fig_class_before$diff_class <- recode(df_fig_class_before$diff_class, 
+                               "lfc1" = "yes - no")
+
+###########################################################################################################################
+# Top 10
+top_10_genera_class_before <- df_fig_class_before %>%
+  arrange(desc(abs(value))) %>%  # Sort by absolute log fold change
+  slice(1:10)  # Select the top 10
+
+# Plot
+F2_before = top_10_genera_class_before %>%
+  ggplot(aes(y = reorder(taxon, abs(value)), x = value, 
+             fill = ifelse(value >= 0, "Positive LFC", "Negative LFC"))) +
+  geom_bar(stat = "identity", width = 0.8, color = "black") +
+  labs(y = "", x = "Abundance", title = "") +
+  scale_fill_manual(values = c("Positive LFC" = "darkslategray3", "Negative LFC" = "coral"),
+                    name = "") +
+  scale_y_discrete(expand = expansion(mult = c(0.08 , 0.08))) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0),
+        axis.text.y = element_text(face = "italic", size = 10), 
+        axis.text.x = element_text(size = 10),
+        strip.text.x = element_text(size = 10),
+        plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "lines"))
+
+```
+#We observed a marked decrease in the Veilonella genus and an increase in the Alloscardovia genus in patients who received the combination of beta-lactams + other classes vs. beta-lactams alone, at the beginning of therapy. As seen later, the Veilonella genus is significantly impacted over time and is possibly related to the combination of beta-lactams with other classes, suffering a significant impact already in the first few days.
+
+
+##########################################################################################################################################
+
+## 3.0 Run ANCOMBC2 After 5th days of antibiotictherapy
+```{r ANCOMBC2_after, eval=TRUE, echo=FALSE}
+# Atualizações frequentes e mudanças no algoritmo, incluindo no output. Revisar antes de usar!
+path <- '/home/local.hcpa.ufrgs.br/rrguerra/ATB'
+Dif_abundance_new = paste(path,"/Differential_abundance_new/",sep = "")
+dir.create(Dif_abundance_new)
+set.seed(123)
+
+
+output_genus_after = ancombc2(data = ps_ATB_after, assay_name = "counts", tax_level = "Genus", #tax_level - aglomeração taxonômica
+                  fix_formula = "Outcome + Age + Sex + Collection_time + diff_class", rand_formula = NULL, 
+                  p_adj_method = "BH", pseudo_sens = TRUE,
+                  prv_cut = 0.1, lib_cut = 1000, s0_perc = 0.05, #prv_cut - ponto de corte de prevalência 
+                  group = "Outcome", struc_zero = TRUE, neg_lb = TRUE, #group - variável primária
+                  alpha = 0.05, n_cl = 20, verbose = TRUE,
+                  global = TRUE, pairwise = TRUE, dunnet = TRUE, trend = FALSE, #Tipo de análise
+                  iter_control = list(tol = 1e-2, max_iter = 20, 
+                                      verbose = TRUE),
+                  em_control = list(tol = 1e-5, max_iter = 100),
+                  lme_control = lme4::lmerControl(),
+                  mdfdr_control = list(fwer_ctrl_method = "holm", B = 100))
+
+```
+
+### 3.1 Genus level after
+#### Structural zeros after
+```{r struc_zeros_after, eval=T, echo=F}
+tab_zero = output_genus_after$zero_ind
+tab_zero %>%
+    datatable(caption = "The detection of structural zeros on Genus level all samples - after 5th days")
+FileName <- paste(Dif_abundance_new,"/Structural_zeros_genus_all_samples_after_5th_days.xlsx", sep = "")
+write_xlsx(tab_zero, FileName)
+```
+
+#### 3.2 Primary analysis for time - After 5th days
+```{r ANCOMBC2_time_after, eval=T, echo=F}
+
+
+res_prim_after = output_genus_after$res
+
+
+df_time_after <- res_prim_after %>%
+    select(taxon, contains("Collection_time"))
+
+
+df_fig_time_after <- df_time_after %>%
+    filter(diff_Collection_time == 1) %>%
+    arrange(desc(lfc_Collection_time)) %>%
+    mutate(direct = ifelse(lfc_Collection_time > 0, "Positive LFC", "Negative LFC"),
+           color = ifelse(passed_ss_Collection_time == 1, "aquamarine3", "black"))
+
+
+df_fig_time_after$taxon <- factor(df_fig_time_after$taxon, levels = df_fig_time_after$taxon)
+
+
+df_fig_time_after$direct <- factor(df_fig_time_after$direct, 
+                                     levels = c("Positive LFC", "Negative LFC"))
+
+
+fig_time_after <- df_fig_time_after %>%
+    ggplot(aes(x = taxon, y = lfc_Collection_time, fill = direct)) + 
+    geom_bar(stat = "identity", width = 0.7, color = "black", 
+             position = position_dodge(width = 0.4)) +
+    geom_errorbar(aes(ymin = lfc_Collection_time - se_Collection_time, 
+                      ymax = lfc_Collection_time + se_Collection_time), 
+                  width = 0.2, position = position_dodge(0.05), color = "black") + 
+    labs(x = NULL, y = "Log fold change", 
+         title = "Log fold changes as one unit increase of Collection time") + 
+    scale_fill_manual(name = NULL, values = c("Positive LFC" = "darkslategray3", "Negative LFC" = "coral")) +
+    theme_bw() + 
+    theme(plot.title = element_text(hjust = 0.5),
+          panel.grid.minor.y = element_blank(),
+          axis.text.x = element_text(angle = 60, hjust = 1, face = 'italic',
+                                     color = df_fig_time_after$color))
+
+
+#print(fig_time_after)
+```
+#No difference was found after the 5th day of therapy for patients who took beta-lactams + other classes vs those who took only beta-lactams. This indicates that the microbiota differs little after several days of antimicrobial therapy among these patients.
+
+#### 3.3 Primary analysis for Outcome (sepsis vs. no_sepsis) -  After 5th days - Figure 4
+```{r ANCOMBC2_prim_after, eval=T, echo=F,message=F, warning=F, fig.cap='Figure 4: Differential abundance (ANCOM-BC2) – taxa significant in sepsis group - After 5th days', fig.align='center', fig.width=5, fig.height=8}
+
+
+res_prim_after = output_genus_after$res
+
+
+df_fig_outcome1_after = res_prim_after %>%
+  dplyr::filter(diff_Outcomesepsis == 1) %>%
+  dplyr::mutate(lfc1 = ifelse(diff_Outcomesepsis == 1, 
+                              round(lfc_Outcomesepsis, 2), 0)) %>%
+  tidyr::pivot_longer(cols = lfc1, 
+                      names_to = "Outcome", values_to = "value") %>%
+  dplyr::arrange(taxon)
+
+df_fig_outcome2_after = res_prim_after %>%
+  dplyr::filter(diff_Outcomesepsis == 1) %>%
+  dplyr::mutate(lfc1 = ifelse(passed_ss_Outcomesepsis == 1 & diff_Outcomesepsis == 1, 
+                              "aquamarine3", "black")) %>%
+  tidyr::pivot_longer(cols = lfc1, 
+                      names_to = "Outcome", values_to = "color") %>%
+  dplyr::arrange(taxon)
+
+df_fig_outcome_after = df_fig_outcome1_after %>%
+  dplyr::left_join(df_fig_outcome2_after, by = c("taxon", "Outcome"))
+
+
+
+df_fig_outcome_after$Outcome <- recode(df_fig_outcome_after$Outcome, 
+                               "lfc1" = "sepsis - no_sepsis")
+
+###########################################################################################################################
+# Top 10
+top_10_genera_outcome_after <- df_fig_outcome_after %>%
+  arrange(desc(abs(value))) %>%  # Sort by absolute log fold change
+  slice(1:10)  # Select the top 10
+
+# Plot
+F2_outcome_after = top_10_genera_outcome_after %>%
+  ggplot(aes(y = reorder(taxon, abs(value)), x = value, 
+             fill = ifelse(value >= 0, "Positive LFC", "Negative LFC"))) +
+  geom_bar(stat = "identity", width = 0.5, color = "black") +
+  labs(y = "", x = "Abundance", title = "") +
+  scale_fill_manual(values = c("Positive LFC" = "darkslategray3", "Negative LFC" = "coral"),
+                    name = "") +
+  scale_y_discrete(expand = expansion(mult = c(0.1 , 0.1))) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0),
+        axis.text.y = element_text(face = "italic", size = 10),  # Italicize taxon names
+        axis.text.x = element_text(size = 10),
+        strip.text.x = element_text(size = 10),
+        plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "lines"))
+
+```
+#After the 5th day of antimicrobial therapy, patients with sepsis showed a decrease in the Turicibacter genus and a marked increase in Eubacterium eligens. This may indicate that these genera may be more influenced by the duration of therapy and also by the combination of antimicrobials. However, in subsequent analyses, we did not observe the combination of antimicrobials and time impacting the abundance of these genera, which may be an indication that these genera are impacted by other factors, such as the pathophysiology of sepsis itself.
+
+## 3.4 Primary analysis for Betalactam combined with other class antibiotics vs. Betalactam only -  After 5th days - Figure 5
+```{r ANCOMBC2_class_after, eval=T, echo=F,message=F, warning=F, fig.cap='Figure 5: Differential abundance (ANCOM-BC2) – taxa significant in Betalactam combined with other class antibiotics vs. Betalactam only - After 5th days', fig.align='center', fig.width=5, fig.height=8}
+
+df_fig_class1_after = res_prim_after %>%
+  dplyr::filter(diff_diff_classyes == 1) %>%
+  dplyr::mutate(lfc1 = ifelse(diff_diff_classyes == 1, 
+                              round(lfc_diff_classyes, 2), 0)) %>%
+  tidyr::pivot_longer(cols = lfc1, 
+                      names_to = "diff_class", values_to = "value") %>%
+  dplyr::arrange(taxon)
+
+df_fig_class2_after = res_prim_after %>%
+  dplyr::filter(diff_diff_classyes == 1) %>%
+  dplyr::mutate(lfc1 = ifelse(passed_ss_diff_classyes == 1 & diff_diff_classyes == 1, 
+                              "aquamarine3", "black")) %>%
+  tidyr::pivot_longer(cols = lfc1, 
+                      names_to = "diff_class", values_to = "color") %>%
+  dplyr::arrange(taxon)
+
+df_fig_class_after = df_fig_class1_after %>%
+  dplyr::left_join(df_fig_class2_after, by = c("taxon", "diff_class"))
+
+
+df_fig_class_after$diff_class <- recode(df_fig_class_after$diff_class, 
+                               "lfc1" = "yes - no")
+
+###########################################################################################################################
+# Top 10
+top_10_genera_class_after <- df_fig_class_after %>%
+  arrange(desc(abs(value))) %>%  # Sort by absolute log fold change
+  slice(1:10)  # Select the top 10
+
+# Plot
+F2_after = top_10_genera_class_after %>%
+  ggplot(aes(y = reorder(taxon, abs(value)), x = value, 
+             fill = ifelse(value >= 0, "Positive LFC", "Negative LFC"))) +
+  geom_bar(stat = "identity", width = 0.8, color = "black") +
+  labs(y = "", x = "Abundance", title = "") +
+  scale_fill_manual(values = c("Positive LFC" = "darkslategray3", "Negative LFC" = "coral"),
+                    name = "") +
+  scale_y_discrete(expand = expansion(mult = c(0.08 , 0.08))) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0),
+        axis.text.y = element_text(face = "italic", size = 10),  # Italicize taxon names
+        axis.text.x = element_text(size = 10),
+        strip.text.x = element_text(size = 10),
+        plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "lines"))
+
+```
+#When we looked at patients who received beta-lactams + other classes vs those who received only beta-lactams, we noticed an increase in the genera Parasuterella, Ruminococcus graveaui and Klebsiella. Therefore, the use of beta-lactams combined with other classes over time seems to have an impact on these genera.
+
+#########################################################################################################################################
+
+## We separated the patients into sepsis and no_sepsis subsets for available the impact the betalactam combination vs betalactam only inside each group. 
+## 4.0 Subset of sepsis and no_sepsis group that received Betalactam combined woth other class vs. Betalactam only
+```{r ANCOMBC2_subsets_outcome, eval=T, echo=F}
+
+ps <- readRDS("ps1.ATB.no.rds")
+metadata <- sample_data(ps)
+
+#subset sepsis
+ps_sepsis <- subset_samples(ps, Outcome == "sepsis")
+
+saveRDS(ps_sepsis, file = "ps1.ATB.sepsis.rds")
+
+#subset no_sepsis
+ps_no_sepsis<- subset_samples(ps, Outcome == "no_sepsis")
+
+saveRDS(ps_no_sepsis, file = "ps1.ATB.no.sepsis.rds")
+
+```
+
+
+## 4.1 Run ANCOMBC for SEPSIS group at genus level
+```{r ANCOMBC2_prim_sepsis, eval=T, echo=F}
+path <- '/home/local.hcpa.ufrgs.br/rrguerra/ATB'
+Dif_abundance_new = paste(path,"/Differential_abundance_new/",sep = "")
+dir.create(Dif_abundance_new)
+set.seed(123)
+
+output_genus_sepsis = ancombc2(data = ps_sepsis, assay_name = "counts", tax_level = "Genus", #tax_level - aglomeração taxonômica
+                  fix_formula = "Age + Sex + Collection_time + diff_class", rand_formula = NULL, #fix_formula - modelar as co-variáveis
+                  p_adj_method = "BH", pseudo_sens = TRUE,
+                  prv_cut = 0.1, lib_cut = 1000, s0_perc = 0.05, #prv_cut - ponto de corte de prevalência 
+                  group = "diff_class", struc_zero = TRUE, neg_lb = TRUE, #group - variável primária
+                  alpha = 0.05, n_cl = 20, verbose = TRUE,
+                  global = TRUE, pairwise = TRUE, dunnet = TRUE, trend = FALSE, #Tipo de análise
+                  iter_control = list(tol = 1e-2, max_iter = 20, 
+                                      verbose = TRUE),
+                  em_control = list(tol = 1e-5, max_iter = 100),
+                  lme_control = lme4::lmerControl(),
+                  mdfdr_control = list(fwer_ctrl_method = "holm", B = 100))
+
+```
+
+## 4.2 Primary analysis for Betalactam combined with other class antibiotics vs. Betalactam only -  SEPSIS group
+``` {r ANCOMBC2_class_sepsis, eval=T, echo=F,message=F, warning=F, fig.cap='Figure 7: Differential abundance (ANCOM-BC2) – taxa significant in Betalactam combined with other class antibiotics vs. Betalactam only - Sepsis group', fig.align='center', fig.width=5, fig.height=8}
+
+res_prim_sepsis = output_genus_sepsis$res
+
+
+df_fig_class1 = res_prim_sepsis %>%
+  dplyr::filter(diff_diff_classyes == 1) %>%
+  dplyr::mutate(lfc1 = ifelse(diff_diff_classyes == 1, 
+                              round(lfc_diff_classyes, 2), 0)) %>%
+  tidyr::pivot_longer(cols = lfc1, 
+                      names_to = "diff_class", values_to = "value") %>%
+  dplyr::arrange(taxon)
+
+df_fig_class2 = res_prim_sepsis %>%
+  dplyr::filter(diff_diff_classyes == 1) %>%
+  dplyr::mutate(lfc1 = ifelse(passed_ss_diff_classyes == 1 & diff_diff_classyes == 1, 
+                              "aquamarine3", "black")) %>%
+  tidyr::pivot_longer(cols = lfc1, 
+                      names_to = "diff_class", values_to = "color") %>%
+  dplyr::arrange(taxon)
+
+df_fig_class = df_fig_class1 %>%
+  dplyr::left_join(df_fig_class2, by = c("taxon", "diff_class"))
+
+# Recode 'group' levels to meaningful labels
+
+df_fig_class$diff_class <- recode(df_fig_class$diff_class, 
+                               "lfc1" = "yes - no")
+
+###########################################################################################################################
+# Top 10
+top_10_genera_class <- df_fig_class %>%
+  arrange(desc(abs(value))) %>%  # Sort by absolute log fold change
+  slice(1:10)  # Select the top 10
+
+# Plot
+F_sepsis = top_10_genera_class %>%
+  ggplot(aes(y = reorder(taxon, abs(value)), x = value, 
+             fill = ifelse(value >= 0, "Positive LFC", "Negative LFC"))) +
+  geom_bar(stat = "identity", width = 0.8, color = "black") +
+  labs(y = "", x = "Abundance", title = "") +
+  scale_fill_manual(values = c("Positive LFC" = "magenta", "Negative LFC" = "lightpink"),
+                    name = "sepsis group") +
+  scale_y_discrete(expand = expansion(mult = c(0.08 , 0.08))) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0),
+        axis.text.y = element_text(face = "italic", size = 10),  # Italicize taxon names
+        axis.text.x = element_text(size = 10),
+        strip.text.x = element_text(size = 10),
+        plot.margin = unit(c(1, 1, 1, 1), "lines"))
+
+```
+##When comparing patients who received a combination of beta-lactams with other classes of antimicrobials to those treated with beta-lactams alone, we observed a notable increase in the abundance of the Klebsiella genus. This pattern was particularly evident among patients who collected stool samples after the 5th day of antibiotic therapy. These findings suggest that Klebsiella may be influenced not only by the duration of antibiotic exposure but also by the specific combination of antimicrobial agents administered.
+
+## 4.3 Differential abundance for sepsis along time (antibiotic therapy).
+```{r ANCOMBC2_time_sepsis, eval=T, echo=F,message=F, warning=F, fig.cap='Figure 8: Differential abundance (ANCOM-BC2) – taxa significant along time in sepsis group', fig.align='center', fig.width=5, fig.height=8}
+
+
+df_time_sepsis <- res_prim_sepsis %>%
+    select(taxon, contains("Collection_time"))
+
+
+df_fig_time_sepsis <- df_time_sepsis %>%
+    filter(diff_Collection_time == 1) %>%
+    arrange(desc(lfc_Collection_time)) %>%
+    mutate(direct = ifelse(lfc_Collection_time > 0, "Positive LFC", "Negative LFC"),
+           color = ifelse(passed_ss_Collection_time == 1, "aquamarine3", "black"))
+
+
+df_fig_time_sepsis$taxon <- factor(df_fig_time_sepsis$taxon, levels = df_fig_time_sepsis$taxon)
+
+
+df_fig_time_sepsis$direct <- factor(df_fig_time_sepsis$direct, 
+                                     levels = c("Positive LFC", "Negative LFC"))
+
+# bar chart plot
+fig_time_sepsis <- df_fig_time_sepsis %>%
+    ggplot(aes(x = taxon, y = lfc_Collection_time, fill = direct)) + 
+    geom_bar(stat = "identity", width = 0.7, color = "black", 
+             position = position_dodge(width = 0.4)) +
+    geom_errorbar(aes(ymin = lfc_Collection_time - se_Collection_time, 
+                      ymax = lfc_Collection_time + se_Collection_time), 
+                  width = 0.2, position = position_dodge(0.05), color = "black") + 
+    labs(x = NULL, y = "LFC", 
+         title = "") + 
+    scale_fill_manual(name = "sepsis group", values = c("Positive LFC" = "magenta", "Negative LFC" = "lightpink")) +
+    theme_bw() + 
+    theme(plot.title = element_text(hjust = 0.5),
+          panel.grid.minor.y = element_blank(),
+          axis.text.x = element_text(angle = 60, hjust = 1, face = 'italic',
+                                     color = df_fig_time_sepsis$color))
+
+```
+#In the sepsis group, the genera Agathobacter and Bifidobacterium are reduced with each day of collection, while the genus Massiliomicrobiota increases. Therefore, these appear to be the genera most impacted by the collection time within the sepsis group.
+
+###########################################################################################################################################
+## 5.0 Run ANCOMBC for NO_SEPSIS group at genus level
+```{r ANCOMBC2_prim_no_sepsis, eval=T, echo=F}
+path <- '/home/local.hcpa.ufrgs.br/rrguerra/ATB'
+Dif_abundance_new = paste(path,"/Differential_abundance_new/",sep = "")
+dir.create(Dif_abundance_new)
+set.seed(123)
+
+# It is recommended that users utilize the default value of B, 
+# which is 100, or larger values for optimal performance.
+output_genus_no_sepsis = ancombc2(data = ps_no_sepsis, assay_name = "counts", tax_level = "Genus", #tax_level - aglomeração taxonômica
+                  fix_formula = "Age + Sex + Collection_time + diff_class", rand_formula = NULL, #fix_formula - modelar as co-variáveis
+                  p_adj_method = "BH", pseudo_sens = TRUE,
+                  prv_cut = 0.1, lib_cut = 1000, s0_perc = 0.05, #prv_cut - ponto de corte de prevalência 
+                  group = "diff_class", struc_zero = TRUE, neg_lb = TRUE, #group - variável primária
+                  alpha = 0.05, n_cl = 20, verbose = TRUE,
+                  global = TRUE, pairwise = TRUE, dunnet = TRUE, trend = FALSE, #Tipo de análise
+                  iter_control = list(tol = 1e-2, max_iter = 20, 
+                                      verbose = TRUE),
+                  em_control = list(tol = 1e-5, max_iter = 100),
+                  lme_control = lme4::lmerControl(),
+                  mdfdr_control = list(fwer_ctrl_method = "holm", B = 100))
+
+```
+
+## 5.1 Primary analysis for Betalactam combined with other class antibiotics vs. Betalactam only -  NO_SEPSIS group
+``` {r ANCOMBC2_class_no_sepsis, eval=T, echo=F,message=F, warning=F, fig.cap='Figure 9: Differential abundance (ANCOM-BC2) – taxa significant in Betalactam combined with other class antibiotics vs. Betalactam only - no\\_sepsis group', fig.align='center', fig.width=8, fig.height=11}
+
+
+res_prim_no_sepsis = output_genus_no_sepsis$res
+
+
+df_fig_class1 = res_prim_no_sepsis %>%
+  dplyr::filter(diff_diff_classyes == 1) %>%
+  dplyr::mutate(lfc1 = ifelse(diff_diff_classyes == 1, 
+                              round(lfc_diff_classyes, 2), 0)) %>%
+  tidyr::pivot_longer(cols = lfc1, 
+                      names_to = "diff_class", values_to = "value") %>%
+  dplyr::arrange(taxon)
+
+df_fig_class2 = res_prim_no_sepsis %>%
+  dplyr::filter(diff_diff_classyes == 1) %>%
+  dplyr::mutate(lfc1 = ifelse(passed_ss_diff_classyes == 1 & diff_diff_classyes == 1, 
+                              "aquamarine3", "black")) %>%
+  tidyr::pivot_longer(cols = lfc1, 
+                      names_to = "diff_class", values_to = "color") %>%
+  dplyr::arrange(taxon)
+
+df_fig_class = df_fig_class1 %>%
+  dplyr::left_join(df_fig_class2, by = c("taxon", "diff_class"))
+
+# Recode 'group' levels to meaningful labels
+
+df_fig_class$diff_class <- recode(df_fig_class$diff_class, 
+                               "lfc1" = "yes - no")
+
+###########################################################################################################################
+# Select the top 10 genera based on absolute log fold change
+top_10_genera_class <- df_fig_class %>%
+  arrange(desc(abs(value))) %>%  # Sort by absolute log fold change
+  slice(1:10)  # Select the top 10
+
+# Create a horizontal bar plot
+F_no_sepsis = top_10_genera_class %>%
+  ggplot(aes(y = reorder(taxon, abs(value)), x = value, 
+             fill = ifelse(value >= 0, "Positive LFC", "Negative LFC"))) +
+  geom_bar(stat = "identity", width = 0.8, color = "black") +
+  labs(y = "", x = "Abundance", title = "") +
+  scale_fill_manual(values = c("Positive LFC" = "darkgreen", "Negative LFC" = "darkseagreen"),
+                    name = "") +
+  scale_y_discrete(expand = expansion(mult = c(0.08 , 0.08))) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0),
+        axis.text.y = element_text(face = "italic", size = 10),  # Italicize taxon names
+        axis.text.x = element_text(size = 10),
+        strip.text.x = element_text(size = 10),
+        plot.margin = unit(c(1, 1, 1, 1), "lines"))
+
+```
+#Within the no_sepsis group, we observed that patients who received the combination of beta-lactam + other classes of antimicrobials compared to those who received only beta-lactam showed a decrease in several taxa, with emphasis on Veillonella, Escherichia, Limosilactobacillus and Desulfovibrio. This indicates that the combination of beta-lactam with other classes has an impact on several genera of the microbiota of patients in the no_sepsis group.
+
+
+## 5.2 Differential abundance for no_sepsis along time (antibiotic therapy).
+```{r ANCOMBC2_time_no_sepsis, eval=T, echo=F,message=F, warning=F, fig.cap=' Figure 10: Differential abundance (ANCOM-BC2) – taxa significant along time in no\\_sepsis group', fig.align='center', fig.width=5, fig.height=8}
+
+
+df_time_no_sepsis <- res_prim_no_sepsis %>%
+    select(taxon, contains("Collection_time"))
+
+
+df_fig_time_no_sepsis <- df_time_no_sepsis %>%
+    filter(diff_Collection_time == 1) %>%
+    arrange(desc(lfc_Collection_time)) %>%
+    mutate(direct = ifelse(lfc_Collection_time > 0, "Positive LFC", "Negative LFC"),
+           color = ifelse(passed_ss_Collection_time == 1, "aquamarine3", "black"))
+
+
+df_fig_time_no_sepsis$taxon <- factor(df_fig_time_no_sepsis$taxon, levels = df_fig_time_no_sepsis$taxon)
+
+df_fig_time_no_sepsis$direct <- factor(df_fig_time_no_sepsis$direct, 
+                                     levels = c("Positive LFC", "Negative LFC"))
+
+
+# Top 10
+df_fig_time_no_sepsis_top <- df_fig_time_no_sepsis %>%
+  filter(!is.na(lfc_Collection_time)) %>%
+  group_by(direct) %>%
+  slice_max(order_by = abs(lfc_Collection_time), n = 10, with_ties = FALSE) %>%
+  ungroup() %>%
+  arrange(desc(lfc_Collection_time))  # Opcional: Organizar positivos primeiro
+
+df_fig_time_no_sepsis_top$taxon <- factor(df_fig_time_no_sepsis_top$taxon, levels = df_fig_time_no_sepsis_top$taxon)
+
+# Plot
+fig_time_no_sepsis <- df_fig_time_no_sepsis_top %>%
+    ggplot(aes(x = taxon, y = lfc_Collection_time, fill = direct)) + 
+    geom_bar(stat = "identity", width = 0.7, color = "black", 
+             position = position_dodge(width = 0.4)) +
+    geom_errorbar(aes(ymin = lfc_Collection_time - se_Collection_time, 
+                      ymax = lfc_Collection_time + se_Collection_time), 
+                  width = 0.2, position = position_dodge(0.05), color = "black") + 
+    labs(x = NULL, y = "LFC", 
+         title = "") + 
+    scale_fill_manual(name = "non-sepsis group", values = c("Positive LFC" = "darkgreen", "Negative LFC" = "darkseagreen")) +
+    theme_bw() + 
+    theme(plot.title = element_text(hjust = 0.5),
+          panel.grid.minor.y = element_blank(),
+          axis.text.x = element_text(angle = 60, hjust = 1, face = 'italic',
+                                     color = df_fig_time_no_sepsis_top$color))
+
+```
+#Within the no_sepsis group, we can observe that with each day of collection, there was a large decrease in the Veillonella gene and an increase in the Extibacter genus. These appear to be the genera most affected by collection time within the no_sepsis group.

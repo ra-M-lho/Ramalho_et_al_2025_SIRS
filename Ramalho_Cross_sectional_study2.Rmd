@@ -1,0 +1,1645 @@
+---
+title: "IDENTIFICATION AND CHARACTERIZATION OF GUT MICROBIOME IN PATIENTS WITH SIRS AND SEPSIS "
+author: "Rafaela Ramalho Guerra"
+date: "`r Sys.Date()`"
+---
+
+# 0 - Prep
+Data for this analysis is from the project 'INTEGRATION OF OMIC TECHNIQUES IN THE IDENTIFICATION AND CHARACTERIZATION OF MICROBIAL AND PROTEIN BIOMARKERS IN PATIENTS WITH SEPSIS', ethics approval 58576722.2.0000.5327, Hospital de Clínicas de Porto Alegre (HCPA). The bioinformatics analyses were performed in the Bioinformatics Core of HCPA. This document presents the microbiome analysis workflow for this project.
+
+In this analysis, we included 89 fecal samples from patients admitted to HCPA with symptoms of SIRS. The patients were categorized into sepsis (n = 38) and no_sepsis (n = 51) groups. The gut microbiome of sepsis patients was compared with that of SIRS patients.
+
+The variables presented in metadata table are:
+#Outcome: Patient outcome (sepsis or no sepsis)  
+#Collection_time: Time point of sample collection during antibiotic therapy  
+#ATB_days or ATB_therapy: Total number of days on antibiotics during admission  
+#Stay_days: Length of hospital stay (admission duration)  
+#Outcome_30_days: 30-day mortality (alive or deceased)  
+#Collection_category or Collection_time_category: Sample collected before or after the 5th day of antibiotic therapy
+#diff_class: patients that received beta-lactam combined qith any other classes of antimicrobial (yes or no)
+#comb_class: patients that receive any combination between classes of antimicrobials.
+#combination: descrition of combination classes
+#comb_beta: descrition of beta-lactam combination
+
+## 0.1 Libraries
+```{r libraries, eval=TRUE, echo=FALSE}
+# clean environment
+#rm(list = ls(all = TRUE))
+library(gtsummary)
+library(kableExtra)
+library(writexl)
+library(dplyr)
+library(phyloseq)
+library(nlme)
+library(vegan)
+library(compositions)
+library(ggplot2)
+library(lme4)
+library(reshape2) 
+library(vegan)
+library(ade4)
+library(plotly)
+library(pracma) 
+library(fpc) 
+library(tidyverse)
+library(purrr)
+library(cluster)
+library(RColorBrewer)
+library(ape)
+library(gplots)
+library(RColorBrewer)
+library(pheatmap)
+library(reticulate)
+library(gridExtra)
+library(broom)
+library(ANCOMBC)
+library(caret)
+library(DT)
+library(ggfortify)
+library(readr)
+library(tibble)
+library(ggprism)
+library(patchwork)
+library(ggpubr)
+```
+
+
+# 1.0 Descriptive data
+```{r desc_data, eval=T, echo=F}
+path <- '/home/local.hcpa.ufrgs.br/rrguerra/study_2'
+overview = paste(path,"/overview/",sep = "")
+dir.create(overview)
+
+ps <- readRDS("ps.study.rds")
+metadata <- sample_data(ps)
+metadata <- microbiome::meta(ps)
+
+# sumarized table
+summary_table <- metadata %>%
+  select(Outcome, Sex, Age, Collection_time, ATB_therapy, Stay_days, Outcome_30_days, SOFA, Collection_time_category, AMC, FEP, CRO, CXM, SAM, AMP, CFZ, OXA, CTX, CAZ, MEM, TZP, ATM, AK, GEN, LFX, CIP, AZM, DO, TGC, PMB, PME, VAN, LZD, SMZ.TMP, CD, RIF, MET, diff_class, comb_class, comb_beta, combination) %>%
+  tbl_summary(
+    by = Outcome, # Compare groups based on "Outcome"
+    statistic = list(all_continuous() ~ "{mean} ({sd})", all_categorical() ~ "{n} / {N} ({p}%)"),
+    label = list(Sex ~ "Sex", Age ~ "Age", Collection_time ~ "Collection_time",  ATB_days ~ "ATB_days", Stay_days ~ "Stay_days", SOFA ~ "SOFA", Outcome_30_days ~ "Outcome_30_days", Collection_time_category ~ "Collection_category", AMC ~ "AMC", FEP ~ "FEP", CRO ~ "CRO", CXM ~ "CXM", SAM ~ "SAM", AMP ~ "AMP", CFZ ~ "CFZ", OXA ~ "OXA", CTX ~ "CTX", CAZ ~ "CAZ", MEM ~ "MEM", TZP ~ "TZP", ATM ~ "ATM", AK ~ "AK", GEN ~ "GEN", LFX ~ "LFX", CIP ~ "CIP", AZM ~ "AZM", DO ~ "DO", TGC ~ "TGC", PMB ~ "PMB", PME ~ "PME", VAN ~ "VAN", LZD ~ "LZD", SMZ.TMP ~ "SMZ.TMP", CD ~ "CD", RIF ~ "RIF", MET ~ "MET", diff_class ~ "diff_class", comb_class ~ "comb_class", comb_beta ~ "comb_beta", combination ~ "combination"),
+    missing = "no"
+  ) %>%
+  add_p() %>%
+  modify_header(label = "**Variable**") %>%
+  bold_labels()
+
+
+summary_table_df <- as_tibble(summary_table$table_body)
+FileName <- paste(overview,"/summary_statistics.xlsx", sep = "")
+write_xlsx(summary_table_df,FileName)
+
+summary_table
+# clean environment
+#rm(list = ls(all = TRUE))
+# clean environment
+#rm(list = ls(all = TRUE))
+```
+
+## 1.1 Checking variables normality
+```{r normality, eval=T, echo=F}
+path <- '/home/local.hcpa.ufrgs.br/rrguerra/study_2/'
+overview = paste(path,"/overview/",sep = "")
+
+variaveis_continuas <- c("Age" , "Collection_time", "ATB_days", "Stay_days", "SOFA") 
+
+# Shapiro-Wilk test and histogram
+avaliar_normalidade <- function(df, variaveis) {
+  resultados_shapiro <- list()
+  graficos <- list()
+  
+  for (var in variaveis) {
+  
+    dados_var <- na.omit(df[[var]])
+    
+
+    shapiro_result <- shapiro.test(dados_var)
+    resultados_shapiro[[var]] <- shapiro_result
+    
+  
+    p <- ggplot(df, aes_string(x = var)) +
+      geom_histogram(aes(y = ..density..), binwidth = 1, fill = "lightblue", color = "black") +
+      geom_density(color = "red", size = 1) +
+      labs(title = paste("Histogram of", var),
+           subtitle = paste("p-value of Shapiro-Wilk test:", round(shapiro_result$p.value, 4)),
+           x = var, y = "Density") +
+      theme_minimal()
+    
+    graficos[[var]] <- p
+  }
+  
+  # Shapiro-Wilk result
+  for (var in variaveis) {
+    cat("Variable:", var, "\n")
+    print(resultados_shapiro[[var]])
+    cat("\n")
+  }
+  
+  # Histogram
+  do.call(grid.arrange, c(graficos, ncol = 2))
+}
+
+# Function on my data frame
+avaliar_normalidade(metadata, variaveis_continuas)
+
+# clean environment
+#rm(list = ls(all = TRUE))
+```
+## 1.2 Checking for multicollinearity
+```{r multicollinearity, eval=T, echo=F}
+path <- '/home/local.hcpa.ufrgs.br/rrguerra/study_2'
+overview = paste(path,"/overview/",sep = "")
+dir.create(overview)
+
+library(dplyr)
+library(GGally)
+
+# sepsis group
+sepsis_data <- metadata %>%
+  filter(Outcome == "sepsis")
+
+# continuos variables
+variaveis_continuas <- sepsis_data %>%
+  select(Age, Collection_time, ATB_days, Stay_days)
+
+# correlation matrix
+matriz_correlacao <- cor(variaveis_continuas, use = "complete.obs", method = "spearman")
+
+print(matriz_correlacao)
+
+ggcorr(variaveis_continuas, method = c("pairwise", "spearman"), label = TRUE)
+
+# clean environment
+#rm(list = ls(all = TRUE))
+```
+# 2.0 Data preparation
+```{r data_prep, eval=FALSE, echo=TRUE}
+ps.dna <- readRDS("ps.study.rds")
+ps.dna
+
+rank_names(ps.dna)
+
+#Features for phylum
+table(tax_table(ps.dna)[, "Phylum"], exclude = NULL)
+
+#Filtering phylum NA
+ps0.dna <- subset_taxa(ps.dna, !is.na(Phylum) 
+                       & !Phylum %in% c("", "uncharacterized", "NA"))
+
+ps0.dna
+
+saveRDS(ps0.dna, "ps0.study.rds")
+
+##############################################################################################################
+#Taxonomic agglomeration
+ps0.study.genus <- tax_glom(ps0.dna, "Genus", NArm = FALSE) #Gênero
+ps0.study.genus
+
+ps0.study.family <- tax_glom(ps0.dna, "Family", NArm = FALSE) #Family
+ps0.study.family
+
+ps0.study.phy <- tax_glom(ps0.dna, "Phylum", NArm = FALSE) #Phylo
+ps0.study.phy
+
+##############################################################################################################
+# feature prevalence
+prevdf = apply(X = otu_table(ps0.dna),
+               MARGIN = ifelse(taxa_are_rows(ps0.dna), yes = 1, no = 2),
+               FUN = function(x){sum(x > 0)})
+
+# taxonomic and reads count
+prevdf = data.frame(Prevalence = prevdf,
+                    TotalAbundance = taxa_sums(ps0.dna),
+                    tax_table(ps0.dna))
+
+
+
+# cut-off prevalence
+prevalenceThreshold = 0.1 * nsamples(ps0.dna)
+prevalenceThreshold
+
+# prevalence filter
+keepTaxa = rownames(prevdf)[(prevdf$Prevalence >= prevalenceThreshold)]
+ps1.study = prune_taxa(keepTaxa, ps0.dna)
+
+ps1.study
+
+
+saveRDS(ps1.study, file = "ps1.study.rds")
+
+################################################################################################################
+#Filtering at genus level
+# feature prevalence count
+prevdf = apply(X = otu_table(ps0.study.genus),
+               MARGIN = ifelse(taxa_are_rows(ps0.study.genus), yes = 1, no = 2),
+               FUN = function(x){sum(x > 0)})
+
+#Taxonomic aglomeration
+prevdf = data.frame(Prevalence = prevdf,
+                    TotalAbundance = taxa_sums(ps0.study.genus),
+                    tax_table(ps0.study.genus))
+
+prevdf1 = subset(prevdf, Genus %in% get_taxa_unique(ps0.dna, "Genus"))
+
+# Prevalence filter
+keepTaxa = rownames(prevdf1)[(prevdf1$Prevalence >= prevalenceThreshold)]
+ps1.study.genus = prune_taxa(keepTaxa, ps0.study.genus)
+
+ps1.study.genus
+
+
+saveRDS(ps1.study.genus, file = "ps1.study.genus.rds")
+################################################################################################################
+#Filtering at family level
+# Feature prevalence
+prevdf = apply(X = otu_table(ps0.study.family),
+               MARGIN = ifelse(taxa_are_rows(ps0.study.family), yes = 1, no = 2),
+               FUN = function(x){sum(x > 0)})
+
+# Taxonomic and reads count
+prevdf = data.frame(Prevalence = prevdf,
+                    TotalAbundance = taxa_sums(ps0.study.family),
+                    tax_table(ps0.study.family))
+
+prevdf1 = subset(prevdf, Family %in% get_taxa_unique(ps0.dna, "Family"))
+
+# Prevalence filter
+keepTaxa = rownames(prevdf1)[(prevdf1$Prevalence >= prevalenceThreshold)]
+ps1.study.family = prune_taxa(keepTaxa, ps0.study.family)
+
+ps1.study.family
+
+saveRDS(ps1.study.family, file = "ps1.study.family.rds")
+
+################################################################################################################
+#Filtering at phylum level
+# Computando a prevalência para cada feature
+prevdf = apply(X = otu_table(ps0.study.phy),
+               MARGIN = ifelse(taxa_are_rows(ps0.study.phy), yes = 1, no = 2),
+               FUN = function(x){sum(x > 0)})
+
+# Taxonomic and reads count
+prevdf = data.frame(Prevalence = prevdf,
+                    TotalAbundance = taxa_sums(ps0.study.phy),
+                    tax_table(ps0.study.phy))
+
+prevdf1 = subset(prevdf, Phylum %in% get_taxa_unique(ps0.dna, "Phylum"))
+
+# Prevalence filter
+keepTaxa = rownames(prevdf1)[(prevdf1$Prevalence >= prevalenceThreshold)]
+ps1.study.phy = prune_taxa(keepTaxa, ps0.study.phy)
+
+ps1.study.phy
+
+saveRDS(ps1.study.phy, file = "ps1.study.phy.rds")
+
+# clean environment
+#rm(list = ls(all = TRUE))
+```
+
+## 2.1 Checking outliers
+### 2.1.1 Outliers by relative abundance
+```{r outliers_barchart, eval=T, echo=F}
+path <- '/home/local.hcpa.ufrgs.br/rrguerra/study_2'
+overview <- paste(path, "/overview/", sep = "")
+
+ps_ASV_ra <- transform_sample_counts(ps1.study, function(x) x / sum(x))
+ps_phylum_ra <- transform_sample_counts(ps1.study.phy, function(x) x / sum(x))
+ps_family_ra <- transform_sample_counts(ps1.study.family, function(x) x / sum(x))
+ps_genus_ra <- transform_sample_counts(ps1.study.genus, function(x) x / sum(x))
+
+
+create_barchart <- function(ps_obj, title, file_prefix) {
+  # Absolute or relative abundance
+  abundance_df <- as.data.frame(otu_table(ps_obj))
+  abundance_df <- abundance_df %>%
+    rownames_to_column("SampleID") %>%
+    pivot_longer(-SampleID, names_to = "Taxa", values_to = "Abundance")
+  
+  # barchart
+  plot <- ggplot(abundance_df, aes(x = SampleID, y = Abundance, fill = Taxa)) +
+    geom_bar(stat = "identity", position = "stack") +
+    labs(x = "Sample", y = "Abundance", title = title) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+          plot.title = element_text(hjust = 0.5),
+          legend.position = "none")
+  
+
+  FileName_PDF <- paste(overview, paste0(file_prefix, ".pdf"), sep = "")
+  FileName_PNG <- paste(overview, paste0(file_prefix, ".png"), sep = "")
+  ggsave(FileName_PDF, plot = plot, width = 180, height = 170, units = "mm", dpi = 300, limitsize = F)
+  ggsave(FileName_PNG, plot = plot, width = 180, height = 170, units = "mm", dpi = 300, limitsize = F)
+  
+  return(plot)
+}
+
+##################################
+
+# 1. Abundance at phylum level
+F1 <- create_barchart(ps_phylum_ra, 
+                      title = "Relative Abundances by Phylum", 
+                      file_prefix = "Relative_Abundance_Phylum")
+
+# 2. Abundance at family level
+F2 <- create_barchart(ps_family_ra, 
+                      title = "Relative Abundances by Family", 
+                      file_prefix = "Relative_Abundance_Family")
+
+# 3. Abundance at genus level
+F3 <- create_barchart(ps_genus_ra, 
+                      title = "Relative Abundances by Genus", 
+                      file_prefix = "Relative_Abundance_Genus")
+
+# 4. Abundance at ASVs level
+F4 <- create_barchart(ps_ASV_ra, 
+                      title = "Relative Abundances by ASV", 
+                      file_prefix = "Relative_Abundance_ASV")
+
+```
+
+### 2.1.2 Outliers by sample size and composition
+```{r outliers_barchart_size, eval=T, echo=F}
+path <- '/home/local.hcpa.ufrgs.br/rrguerra/study_2'
+overview <- paste(path, "/overview/", sep = "")
+
+
+create_barchart <- function(ps_obj, title, file_prefix) {
+  # Absolute or relative abundances
+  abundance_df <- as.data.frame(otu_table(ps_obj))
+  abundance_df <- abundance_df %>%
+    rownames_to_column("SampleID") %>%
+    pivot_longer(-SampleID, names_to = "Taxa", values_to = "Abundance")
+  
+  # Barchart
+  plot <- ggplot(abundance_df, aes(x = SampleID, y = Abundance, fill = Taxa)) +
+    geom_bar(stat = "identity", position = "stack") +
+    labs(x = "Sample", y = "Abundance", title = title) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+          plot.title = element_text(hjust = 0.5),
+          legend.position = "none")
+  
+
+  FileName_PDF <- paste(overview, paste0(file_prefix, ".pdf"), sep = "")
+  FileName_PNG <- paste(overview, paste0(file_prefix, ".png"), sep = "")
+  ggsave(FileName_PDF, plot = plot, width = 180, height = 170, units = "mm", dpi = 300)
+  ggsave(FileName_PNG, plot = plot, width = 180, height = 170, units = "mm", dpi = 300)
+  
+  return(plot)
+}
+
+
+
+# 1. Abundance at phylum level
+F5 <- create_barchart(ps1.study.phy, 
+                      title = "Abundances by Phylum", 
+                      file_prefix = "Abundance_Phylum")
+
+# 2. Abundance at family level
+F6 <- create_barchart(ps1.study.family, 
+                      title = "Abundances by Family", 
+                      file_prefix = "Abundance_Family")
+
+# 3. Abundance at genus level
+F7 <- create_barchart(ps1.study.genus, 
+                      title = "Abundances by Genus", 
+                      file_prefix = "Abundance_Genus")
+
+
+```
+### 2.1.3 Multivariate outliers
+```{r outliers_PCA, eval=T, echo=F}
+path <- '/home/local.hcpa.ufrgs.br/rrguerra/study_2'
+overview <- paste(path, "/overview/", sep = "")
+
+palette <- c("darkgreen","magenta")
+
+
+seq_counts <- as.data.frame(t(otu_table(ps1.study)))
+samdf <- microbiome::meta(ps1.study)
+
+# PCA
+log_rats <- data.frame(compositions::ilr(t(seq_counts)))
+
+
+lograt_pca <- prcomp(log_rats)
+lograt_variances<-lograt_pca$sdev^2/sum(lograt_pca$sdev^2)
+
+#df for PCA
+pca_lograt_frame<-data.frame(lograt_pca$x,
+                          Outcome=cbind(as.character(samdf$Outcome)))
+
+#plot
+lrpca <- ggplot(pca_lograt_frame) +
+  geom_point(aes(x = PC1, y = PC2, col = Outcome)) +
+  ylab(paste0('PC2 ', round(lograt_variances[2] * 100, 2), '%')) +
+  xlab(paste0('PC1 ', round(lograt_variances[1] * 100, 2), '%')) +
+  scale_color_manual(values = palette, name = 'Outcome') +
+  ggtitle('Log-Ratio PCA Ordination - Outcome') +
+  coord_fixed(ratio = lograt_variances[2] / lograt_variances[1]) +
+  theme_bw()
+
+
+# clean environment
+#rm(list = ls(all = TRUE))
+```
+
+### 2.1.4 Removing outliers
+# sample R010 is clear outliers and will be removed.
+```{r outliers_drop, eval=F, echo=F}
+
+amostras_remover <- ("R010A")
+
+arquivos_originais <- c("ps0.study.rds",  "ps1.study.rds", "ps1.study.phy.rds", "ps1.study.family.rds", "ps1.study.genus.rds")
+
+# Remove samples and save new phyloseq object
+remover_amostras_e_salvar <- function(arquivo) {
+  # Carregar o objeto phyloseq
+  ps_obj <- readRDS(arquivo)
+  
+  # Remover as amostras especificadas
+  ps_obj_no <- prune_samples(!(sample_names(ps_obj) %in% amostras_remover), ps_obj)
+  
+  # new name
+  novo_nome <- sub(".rds$", ".no.rds", arquivo)
+  
+  # save
+  saveRDS(ps_obj_no, file = novo_nome)
+  
+}
+
+
+lapply(arquivos_originais, remover_amostras_e_salvar)
+
+# clean environment
+rm(list = ls(all = TRUE))
+```
+
+# 3.0 Microbiome overview
+## 3.1 Ajusting for calculations and tables
+```{r microbiome_overview, eval=T, echo=F}
+path <- '/home/local.hcpa.ufrgs.br/rrguerra/study_2'
+overview = paste(path,"/overview/",sep = "")
+
+ps0.dna <- readRDS("ps1.study.no.rds")
+
+#Aglomerate
+ps.dna.phy <- tax_glom(ps0.dna, "Phylum", NArm = TRUE)
+ps.dna.family <- tax_glom(ps0.dna, "Family", NArm = TRUE)
+ps.dna.genus <- tax_glom(ps0.dna, "Genus", NArm = TRUE)
+
+#ASV level
+ps.ra <- transform_sample_counts(ps0.dna, function(x) x/sum(x))
+
+#Phylum level
+taxa_names(ps.dna.phy) <- tax_table(ps.dna.phy)[,2]
+ps.phy.ra <- transform_sample_counts(ps.dna.phy, function(x) x/sum(x))
+
+#Family level
+taxa_names(ps.dna.family) <- tax_table(ps.dna.family)[,5]
+ps.family.ra <- transform_sample_counts(ps.dna.family, function(x) x/sum(x))
+
+#Genus level
+#taxa_names(ps.dna.genus) <- tax_table(ps.dna.genus)[,6]
+ps.genus.ra <- transform_sample_counts(ps.dna.genus, function(x) x/sum(x))
+genus.melt <- psmelt(ps.genus.ra)
+```
+
+### 3.1.1 Dominant taxa
+#### Tables
+The distribution of the reads are here summarized on phylum, family and genus level. 
+```{r ov_microbiome_tables, eval=T, echo=F}
+df2 <- data.frame(tax_table(ps.dna.phy), taxprc = 100*taxa_sums(ps.phy.ra)/length(sample_names(ps.phy.ra)))
+df3 <- data.frame(tax_table(ps.dna.family), taxprc = 100*taxa_sums(ps.family.ra)/length(sample_names(ps.family.ra)))
+df4 <- data.frame(tax_table(ps.dna.genus),taxprc = 100*taxa_sums(ps.genus.ra)/length(sample_names(ps.genus.ra)))
+df5 <- data.frame(tax_table(ps0.dna),taxprc = 100*taxa_sums(ps.ra)/length(sample_names(ps.ra)))
+
+df.count <- data.frame(Included = c("All", "> 0.01%", "> 0.1%","> 1%"),
+                          Phylum = c(nrow(df2),sum(df2$taxprc > 0.01),sum(df2$taxprc > 0.1),sum(df2$taxprc > 1)),
+                          Family = c(nrow(df3),sum(df3$taxprc > 0.01),sum(df3$taxprc > 0.1),sum(df3$taxprc > 1)),
+                          Genus = c(nrow(df4),sum(df4$taxprc > 0.01),sum(df4$taxprc > 0.1),sum(df4$taxprc > 1)),
+                          ASV = c(nrow(df5),sum(df5$taxprc > 0.01),sum(df5$taxprc > 0.1),sum(df5$taxprc > 1)))
+
+# Count of ASV and taxa in samples
+kable(df.count, row.names = F,digits = 1, caption = 'Abundance of phyla, family, genera and ASV in microbiome samples')%>% 
+  kable_classic(full_width = F, position = "left")
+
+
+FileName <- paste(overview,"/Abundance of phyla, family, genera and ASV in microbiome samples.xlsx", sep = "")
+write_xlsx(df.count,FileName)
+
+# Top 6 dominating phyla (prc abundance)
+kable(head(df2[order(df2$taxprc,decreasing = T),c("Kingdom","Phylum","taxprc")]), row.names = F,digits = 1, caption = 'Average abundance according to phylum',col.names = c("Kingdom","Phylum","Abundance (%)"))%>% 
+  kable_classic(full_width = F, position = "left")
+# Se quiser exportar para um arquivo Excel
+FileName <- paste(overview,"/Average abundance according to phylum.xlsx", sep = "")
+write_xlsx(df2,FileName)
+
+# Top 6 dominating family (prc abundance)
+kable(head(df3[order(df3$taxprc,decreasing = T),c("Kingdom","Phylum","Family", "taxprc")]), row.names = F,digits = 1, caption = 'Average abundance according to family',col.names = c("Kingdom","Phylum", "Family", "Abundance (%)"))%>% 
+  kable_classic(full_width = F, position = "left")
+# Se quiser exportar para um arquivo Excel
+FileName <- paste(overview,"/Average abundance according to family.xlsx", sep = "")
+write_xlsx(df3,FileName)
+
+# Top 6 dominating (genera prc abundance)
+kable(head(df4[order(df4$taxprc,decreasing = T),c("Kingdom","Phylum","Class","Order","Family","Genus","taxprc")]), row.names = F,digits = 1, caption = 'Average abundance according to genus',col.names = c("Kingdom","Phylum","Class","Order","Family","Genus","Abundance (%)"))%>% 
+  kable_classic(full_width = F, position = "left")
+# Se quiser exportar para um arquivo Excel
+FileName <- paste(overview,"/Average abundance according to genus.xlsx", sep = "")
+write_xlsx(df4,FileName)
+
+# clean environment
+rm(list = ls(all = TRUE))
+```
+
+### 3.1.2 Distribution of taxa in Sepsis samples
+```{r sepsis_dist1, eval=T, echo=F}
+path <- '/home/local.hcpa.ufrgs.br/rrguerra/study_2'
+overview_group = paste(path,"/overview_by_group/",sep = "")
+dir.create(overview_group)
+
+ps <- readRDS("ps1.study.no.rds")
+ps.sepsis <- subset_samples(ps, Outcome=='sepsis')
+
+
+ps.sepsis.phy <- tax_glom(ps.sepsis, "Phylum", NArm = TRUE)
+ps.sepsis.family <- tax_glom(ps.sepsis, "Family", NArm = TRUE)
+ps.sepsis.genus <- tax_glom(ps.sepsis, "Genus", NArm = TRUE)
+
+#ASV level
+ps.sepsis.ra <- transform_sample_counts(ps.sepsis, function(x) x/sum(x))
+
+#Phylum level
+taxa_names(ps.sepsis.phy) <- tax_table(ps.sepsis.phy)[,2]
+ps.sepsis.phy.ra <- transform_sample_counts(ps.sepsis.phy, function(x) x/sum(x))
+
+#Family level
+taxa_names(ps.sepsis.family) <- tax_table(ps.sepsis.family)[,5]
+ps.sepsis.family.ra <- transform_sample_counts(ps.sepsis.family, function(x) x/sum(x))
+
+#Genus level
+#taxa_names(ps.dna.genus) <- tax_table(ps.dna.genus)[,6]
+ps.sepsis.genus.ra <- transform_sample_counts(ps.sepsis.genus, function(x) x/sum(x))
+ps.sepsis.genus.melt <- psmelt(ps.sepsis.genus.ra)
+
+library(kableExtra)
+
+df2 <- data.frame(tax_table(ps.sepsis.phy), taxprc = 100*taxa_sums(ps.sepsis.phy.ra)/length(sample_names(ps.sepsis.phy.ra)))
+df3 <- data.frame(tax_table(ps.sepsis.family), taxprc = 100*taxa_sums(ps.sepsis.family.ra)/length(sample_names(ps.sepsis.family.ra)))
+df4 <- data.frame(tax_table(ps.sepsis.genus),taxprc = 100*taxa_sums(ps.sepsis.genus.ra)/length(sample_names(ps.sepsis.genus.ra)))
+df5 <- data.frame(tax_table(ps.sepsis),taxprc = 100*taxa_sums(ps.sepsis.ra)/length(sample_names(ps.sepsis.ra)))
+
+df.count <- data.frame(Included = c("All", "> 0.01%", "> 0.1%","> 1%"),
+                          Phylum = c(nrow(df2),sum(df2$taxprc > 0.01),sum(df2$taxprc > 0.1),sum(df2$taxprc > 1)),
+                          Family = c(nrow(df3),sum(df3$taxprc > 0.01),sum(df3$taxprc > 0.1),sum(df3$taxprc > 1)),
+                          Genus = c(nrow(df4),sum(df4$taxprc > 0.01),sum(df4$taxprc > 0.1),sum(df4$taxprc > 1)),
+                          ASV = c(nrow(df5),sum(df5$taxprc > 0.01),sum(df5$taxprc > 0.1),sum(df5$taxprc > 1)))
+
+# Count of ASV and taxa in rosacea samples
+kable(df.count, row.names = F,digits = 1, caption = 'Abundance of phyla, family, genera and ASV in sepsis samples')%>% 
+  kable_classic(full_width = F, position = "left")
+
+
+# Top 6 dominating phyla (prc abundance)
+kable(head(df2[order(df2$taxprc,decreasing = T),c("Kingdom","Phylum","taxprc")]), row.names = F,digits = 1, caption = 'Average abundance according to phylum in sepsis samples',col.names = c("Kingdom","Phylum","Abundance (%)"))%>% 
+  kable_classic(full_width = F, position = "left")
+
+
+# Top 6 dominating family (prc abundance)
+kable(head(df3[order(df3$taxprc,decreasing = T),c("Kingdom","Phylum","Family", "taxprc")]), row.names = F,digits = 1, caption = 'Average abundance according to family in sepsis samples',col.names = c("Kingdom","Phylum", "Family", "Abundance (%)"))%>% 
+  kable_classic(full_width = F, position = "left")
+
+
+# Top 6 dominating (genera prc abundance)
+kable(head(df4[order(df4$taxprc,decreasing = T),c("Kingdom","Phylum","Class","Order","Family","Genus","taxprc")]), row.names = F,digits = 1, caption = 'Average abundance according to genus in sepsis samples',col.names = c("Kingdom","Phylum","Class","Order","Family","Genus","Abundance (%)"))%>% 
+  kable_classic(full_width = F, position = "left")
+
+
+# clean environment
+#rm(list = ls(all = TRUE))
+```
+
+### 3.1.3 Distribution of taxa in no_Sepsis samples
+```{r no_sepsis_dist, eval=T, echo=F}
+ps.no.sepsis <- subset_samples(ps, Outcome=='no_sepsis')
+
+
+ps.no.sepsis.phy <- tax_glom(ps.no.sepsis, "Phylum", NArm = TRUE)
+ps.no.sepsis.family <- tax_glom(ps.no.sepsis, "Family", NArm = TRUE)
+ps.no.sepsis.genus <- tax_glom(ps.no.sepsis, "Genus", NArm = TRUE)
+
+#ASV level
+ps.no.sepsis.ra <- transform_sample_counts(ps.no.sepsis, function(x) x/sum(x))
+
+#Phylum level
+taxa_names(ps.no.sepsis.phy) <- tax_table(ps.no.sepsis.phy)[,2]
+ps.no.sepsis.phy.ra <- transform_sample_counts(ps.no.sepsis.phy, function(x) x/sum(x))
+
+#Family level
+taxa_names(ps.no.sepsis.family) <- tax_table(ps.no.sepsis.family)[,5]
+ps.no.sepsis.family.ra <- transform_sample_counts(ps.no.sepsis.family, function(x) x/sum(x))
+
+#Genus level
+#taxa_names(ps.dna.genus) <- tax_table(ps.dna.genus)[,6]
+ps.no.sepsis.genus.ra <- transform_sample_counts(ps.no.sepsis.genus, function(x) x/sum(x))
+ps.no.sepsis.genus.melt <- psmelt(ps.no.sepsis.genus.ra)
+
+
+df2 <- data.frame(tax_table(ps.no.sepsis.phy), taxprc = 100*taxa_sums(ps.no.sepsis.phy.ra)/length(sample_names(ps.no.sepsis.phy.ra)))
+df3 <- data.frame(tax_table(ps.no.sepsis.family), taxprc = 100*taxa_sums(ps.no.sepsis.family.ra)/length(sample_names(ps.no.sepsis.family.ra)))
+df4 <- data.frame(tax_table(ps.no.sepsis.genus),taxprc = 100*taxa_sums(ps.no.sepsis.genus.ra)/length(sample_names(ps.no.sepsis.genus.ra)))
+df5 <- data.frame(tax_table(ps.no.sepsis),taxprc = 100*taxa_sums(ps.no.sepsis.ra)/length(sample_names(ps.no.sepsis.ra)))
+
+df.count <- data.frame(Included = c("All", "> 0.01%", "> 0.1%","> 1%"),
+                          Phylum = c(nrow(df2),sum(df2$taxprc > 0.01),sum(df2$taxprc > 0.1),sum(df2$taxprc > 1)),
+                          Family = c(nrow(df3),sum(df3$taxprc > 0.01),sum(df3$taxprc > 0.1),sum(df3$taxprc > 1)),
+                          Genus = c(nrow(df4),sum(df4$taxprc > 0.01),sum(df4$taxprc > 0.1),sum(df4$taxprc > 1)),
+                          ASV = c(nrow(df5),sum(df5$taxprc > 0.01),sum(df5$taxprc > 0.1),sum(df5$taxprc > 1)))
+
+# Count of ASV and taxa in control samples
+kable(df.count, row.names = F,digits = 1, caption = 'Abundance of phyla, family, genera and ASV in no_sepsis samples')%>% 
+  kable_classic(full_width = F, position = "left")
+
+# Top 6 dominating phyla (prc abundance)
+kable(head(df2[order(df2$taxprc,decreasing = T),c("Kingdom","Phylum","taxprc")]), row.names = F,digits = 1, caption = 'Average abundance according to phylum in no_sepsis samples',col.names = c("Kingdom","Phylum","Abundance (%)"))%>% 
+  kable_classic(full_width = F, position = "left")
+
+# Top 6 dominating family (prc abundance)
+kable(head(df3[order(df3$taxprc,decreasing = T),c("Kingdom","Phylum","Family", "taxprc")]), row.names = F,digits = 1, caption = 'Average abundance according to family in no_sepsis samples',col.names = c("Kingdom","Phylum", "Family", "Abundance (%)"))%>% 
+  kable_classic(full_width = F, position = "left")
+
+# Top 6 dominating (genera prc abundance)
+kable(head(df4[order(df4$taxprc,decreasing = T),c("Kingdom","Phylum","Class","Order","Family","Genus","taxprc")]), row.names = F,digits = 1, caption = 'Average abundance according to genus in no_sepsis samples',col.names = c("Kingdom","Phylum","Class","Order","Family","Genus","Abundance (%)"))%>% 
+  kable_classic(full_width = F, position = "left")
+
+# clean environment
+rm(list = ls(all = TRUE))
+```
+
+### 3.1.4 Sepsis x no_Sepsis composition - Phylum level
+```{r sepsis_no_sepsis_comp_Phylum, eval=T, echo=F}
+path <- '/home/local.hcpa.ufrgs.br/rrguerra/study_2'
+overview_group = paste(path,"/overview_by_group/",sep = "")
+
+ps <- readRDS("ps1.study.phy.no.rds")
+
+ps_ra <- transform_sample_counts(ps, function(x) x / sum(x))
+ps_ra_melt <- psmelt(ps_ra)
+
+palette <- c("darkgreen","magenta")
+
+#Legend
+g_legend<-function(a.gplot){ 
+  tmp <- ggplot_gtable(ggplot_build(a.gplot)) 
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box") 
+  legend <- tmp$grobs[[leg]] 
+  return(legend)} 
+mytheme <- theme(axis.title = element_text(size = 10), axis.text = element_text(size = 8)) + theme_bw()
+
+# Subset
+Phylum.summary <- aggregate(Abundance~Outcome+Phylum, data = ps_ra_melt, FUN = mean)
+Phylum.summary.ordered <- Phylum.summary[order(Phylum.summary$Abundance,decreasing = T),]
+
+# Top 10
+Phylum.top.1 <- Phylum.summary.ordered$Phylum[Phylum.summary.ordered$Outcome == "sepsis"][1:10]
+Phylum.top.2 <- Phylum.summary.ordered$Phylum[Phylum.summary.ordered$Outcome == "no_sepsis"][1:10]
+
+# subset 
+top10 <- unique(c(Phylum.top.1,Phylum.top.2))#,Phylum.top.3))
+top10.max <- aggregate(Abundance~Phylum, data = Phylum.summary.ordered[Phylum.summary.ordered$Phylum %in% top10,], max)
+
+Phylum.keep <- top10.max$Phylum[top10.max$Abundance>0.01]
+
+# Boxplot top Phylum for group
+ps_ra_melt$Abundance_percent <- ifelse(ps_ra_melt$Abundance < 0.001, 0.1,ps_ra_melt$Abundance*100)
+
+F1 <- ggplot(ps_ra_melt[ps_ra_melt$Phylum %in% Phylum.keep,], aes(y = Phylum, x = Abundance_percent)) + 
+  geom_boxplot(position =position_dodge2(reverse = TRUE), aes(color = Outcome), alpha = 0.5) + 
+  geom_boxplot(position =position_dodge2(reverse = TRUE), aes(fill = Outcome), alpha = 0.5, outlier.shape = 21) +
+  #facet_wrap(~ Exam, nrow = 1) +
+  scale_fill_manual(values = palette) + 
+  scale_color_manual(values = palette) + 
+  scale_x_log10() +
+  ylab("") +
+  xlab("Abundance (%)") +
+  theme_bw() + theme(axis.title = element_text(size = 10), axis.text.x = element_text(size = 8),legend.position = 'bottom',axis.text.y = element_text(face="italic",size = 8),
+  plot.margin = unit(c(1, 1, 1, 1), "lines")) # Ajuste as margens aqui (topo, direita, baixo, esquerda)
+
+print(F1)
+
+# plot legend
+F1_legend <- g_legend(F1 + geom_boxplot(aes(color=Outcome,fill=Outcome),alpha=0.5)+ 
+  theme_bw() + theme(axis.title = element_text(size = 10), 
+                     axis.text = element_text(size = 8), 
+                     axis.text.x=element_blank(), 
+                     axis.ticks.x=element_blank(), 
+                     legend.position = 'bottom'))
+
+# clean environment
+rm(list = ls(all = TRUE))
+```
+
+### 3.1.5 Sepsis x no_Sepsis composition - Family level
+```{r sepsis_no_sepsis_comp_family, eval=T, echo=F}
+path <- '/home/local.hcpa.ufrgs.br/rrguerra/study_2'
+overview_group = paste(path,"/overview_by_group/",sep = "")
+
+
+ps <- readRDS("ps1.study.family.no.rds")
+
+
+ps_ra <- transform_sample_counts(ps, function(x) x / sum(x))
+ps_ra_melt <- psmelt(ps_ra)
+
+
+palette <- c("darkgreen","magenta")
+
+#Legend
+g_legend<-function(a.gplot){ 
+  tmp <- ggplot_gtable(ggplot_build(a.gplot)) 
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box") 
+  legend <- tmp$grobs[[leg]] 
+  return(legend)} 
+mytheme <- theme(axis.title = element_text(size = 10), axis.text = element_text(size = 8)) + theme_bw()
+
+# Subset
+family.summary <- aggregate(Abundance~Outcome+Family, data = ps_ra_melt, FUN = mean)
+family.summary.ordered <- family.summary[order(family.summary$Abundance,decreasing = T),]
+
+# top 10
+family.top.1 <- family.summary.ordered$Family[family.summary.ordered$Outcome == "sepsis"][1:10]
+family.top.2 <- family.summary.ordered$Family[family.summary.ordered$Outcome == "no_sepsis"][1:10]
+
+# subset 
+top10 <- unique(c(family.top.1,family.top.2))
+top10.max <- aggregate(Abundance~Family, data = family.summary.ordered[family.summary.ordered$Family %in% top10,], max)
+
+family.keep <- top10.max$Family[top10.max$Abundance>0.01]
+
+# Boxplot top family for group
+ps_ra_melt$Abundance_percent <- ifelse(ps_ra_melt$Abundance < 0.001, 0.1,ps_ra_melt$Abundance*100)
+
+F2 <- ggplot(ps_ra_melt[ps_ra_melt$Family %in% family.keep,], aes(y = Family, x = Abundance_percent)) + 
+  geom_boxplot(position =position_dodge2(reverse = TRUE), aes(color = Outcome), alpha = 0.5) + 
+  geom_boxplot(position =position_dodge2(reverse = TRUE), aes(fill = Outcome), alpha = 0.5, outlier.shape = 21) +
+  #facet_wrap(~ Exam, nrow = 1) +
+  scale_fill_manual(values = palette) + 
+  scale_color_manual(values = palette) + 
+  scale_x_log10() +
+  ylab("") +
+  xlab("Abundance (%)") +
+  theme_bw() + theme(axis.title = element_text(size = 10), axis.text.x = element_text(size = 8),legend.position = 'bottom',axis.text.y = element_text(face="italic",size = 8),
+  plot.margin = unit(c(1, 1, 1, 1), "lines")) # Ajuste as margens aqui (topo, direita, baixo, esquerda)
+
+print(F2)
+
+# plot legend
+F2_legend <- g_legend(F2 + geom_boxplot(aes(color=Outcome,fill=Outcome),alpha=0.5)+ 
+  theme_bw() + theme(axis.title = element_text(size = 10), 
+                     axis.text = element_text(size = 8), 
+                     axis.text.x=element_blank(), 
+                     axis.ticks.x=element_blank(), 
+                     legend.position = 'bottom'))
+
+# clean environment
+rm(list = ls(all = TRUE))
+```
+
+### 3.1.6 Sepsis x no_sepsis composition - Genus level
+```{r sepsis_no_sepsis_comp_genus, eval=T, echo=F}
+path <- '/home/local.hcpa.ufrgs.br/rrguerra/study_2'
+overview_group = paste(path,"/overview_by_group/",sep = "")
+
+ps <- readRDS("ps1.study.genus.no.rds")
+
+
+ps_ra <- transform_sample_counts(ps, function(x) x / sum(x))
+ps_ra_melt <- psmelt(ps_ra)
+
+
+palette <- c("darkgreen","magenta")
+
+#Legend
+g_legend<-function(a.gplot){ 
+  tmp <- ggplot_gtable(ggplot_build(a.gplot)) 
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box") 
+  legend <- tmp$grobs[[leg]] 
+  return(legend)} 
+mytheme <- theme(axis.title = element_text(size = 10), axis.text = element_text(size = 8)) + theme_bw()
+
+# subset relevant taxa
+genus.summary <- aggregate(Abundance~Outcome+Genus, data = ps_ra_melt, FUN = mean)
+genus.summary.ordered <- genus.summary[order(genus.summary$Abundance,decreasing = T),]
+
+# find top 10 per time point
+genus.top.1 <- genus.summary.ordered$Genus[genus.summary.ordered$Outcome == "sepsis"][1:10]
+genus.top.2 <- genus.summary.ordered$Genus[genus.summary.ordered$Outcome == "no_sepsis"][1:10]
+
+# subset the ones with mead abundance above 
+top10 <- unique(c(genus.top.1,genus.top.2))
+top10.max <- aggregate(Abundance~Genus, data = genus.summary.ordered[genus.summary.ordered$Genus %in% top10,], max)
+genus.keep <- top10.max$Genus[top10.max$Abundance>0.01]
+
+# fig 2 a (boxplot top genera by group)
+ps_ra_melt$Abundance_percent <- ifelse(ps_ra_melt$Abundance < 0.001, 0.1,ps_ra_melt$Abundance*100)
+
+F3 <- ggplot(ps_ra_melt[ps_ra_melt$Genus %in% genus.keep,], aes(y = Genus, x = Abundance_percent)) + 
+  geom_boxplot(position =position_dodge2(reverse = TRUE), aes(color = Outcome), alpha = 0.5) + 
+  geom_boxplot(position =position_dodge2(reverse = TRUE), aes(fill = Outcome), alpha = 0.5, outlier.shape = 21) +
+  #facet_wrap(~ Exam, nrow = 1) +
+  scale_fill_manual(values = palette) + 
+  scale_color_manual(values = palette) + 
+  scale_x_log10() +
+  ylab("") +
+  xlab("Abundance (%)") +
+  theme_bw() + theme(axis.title = element_text(size = 10), axis.text.x = element_text(size = 8),legend.position = 'bottom',axis.text.y = element_text(face="italic",size = 8),
+  plot.margin = unit(c(1, 1, 1, 1), "lines")) # Ajuste as margens aqui (topo, direita, baixo, esquerda)
+
+print(F3)
+
+# plot legend
+F3_legend <- g_legend(F3 + geom_boxplot(aes(color=Outcome,fill=Outcome),alpha=0.5)+ 
+  theme_bw() + theme(axis.title = element_text(size = 10), 
+                     axis.text = element_text(size = 8), 
+                     axis.text.x=element_blank(), 
+                     axis.ticks.x=element_blank(), 
+                     legend.position = 'bottom'))
+
+# clean environment
+rm(list = ls(all = TRUE))
+```
+
+### 3.1.7 Sepsis x no_sepsis composition Before 5th day x After 5th day of antimicrobial therapy - Genus level
+```{r sepsis_vs_no_sepsis_before_5th_days_vs_after_5th_days, eval=T, echo=F}
+
+###Sepsis x no_Sepsis composition - Phylum level
+path <- '/home/local.hcpa.ufrgs.br/rrguerra/study_2'
+overview_group = paste(path,"/overview_by_group/",sep = "")
+
+ps_phy <- readRDS("ps1.study.phy.no.rds")
+metadata_phy <- sample_data(ps_phy)
+
+
+ps_ra_phy <- transform_sample_counts(ps_phy, function(x) x / sum(x))
+ps_ra_melt_phy <- psmelt(ps_ra_phy)
+
+
+palette <- c("darkgreen","magenta")
+
+#Legend
+g_legend_phy<-function(a.gplot){ 
+  tmp_phy <- ggplot_gtable(ggplot_build(a.gplot)) 
+  leg_phy <- which(sapply(tmp_phy$grobs, function(x) x$name) == "guide-box") 
+  legend_phy <- tmp_phy$grobs[[leg_phy]] 
+  return(legend_phy)} 
+mytheme_phy <- theme(axis.title = element_text(size = 10), axis.text = element_text(size = 8)) + theme_bw()
+
+# Subset
+Phylum.summary_phy <- aggregate(Abundance~Outcome+Phylum, data = ps_ra_melt_phy, FUN = mean)
+Phylum.summary.ordered_phy <- Phylum.summary_phy[order(Phylum.summary_phy$Abundance,decreasing = T),]
+
+# Top 10 for group
+Phylum.top.1_phy <- Phylum.summary.ordered_phy$Phylum[Phylum.summary.ordered_phy$Outcome == "sepsis"][1:5]
+Phylum.top.2_phy <- Phylum.summary.ordered_phy$Phylum[Phylum.summary.ordered_phy$Outcome == "no_sepsis"][1:5]
+
+# subset 
+top10_phy <- unique(c(Phylum.top.1_phy,Phylum.top.2_phy))#,Phylum.top.3))
+top10.max_phy <- aggregate(Abundance~Phylum, data = Phylum.summary.ordered_phy[Phylum.summary.ordered_phy$Phylum %in% top10_phy,], max)
+
+Phylum.keep_phy <- top10.max_phy$Phylum[top10.max_phy$Abundance>0.01]
+
+# Boxplot top Phylum for group
+ps_ra_melt_phy$Abundance_percent <- ifelse(ps_ra_melt_phy$Abundance < 0.001, 0.1,ps_ra_melt_phy$Abundance*100)
+
+
+ps_ra_melt_phy$Collection_time_category <- factor(
+  ps_ra_melt_phy$Collection_time_category, 
+  levels = c("Before_5_days", "After_5_days")  
+)
+
+F1 <- ggplot(ps_ra_melt_phy[ps_ra_melt_phy$Phylum %in% Phylum.keep_phy,], 
+             aes(y = Phylum, x = Abundance_percent)) + 
+  geom_boxplot(position = position_dodge2(reverse = TRUE), aes(color = Outcome), alpha = 0.5) + 
+  geom_boxplot(position = position_dodge2(reverse = TRUE), aes(fill = Outcome), alpha = 0.5, outlier.shape = 21) +
+  facet_wrap(~ Collection_time_category, nrow = 1, scales = "free_x") +  # Ajusta os eixos para cada faceta
+  scale_fill_manual(values = palette) + 
+  scale_color_manual(values = palette) + 
+  scale_x_log10() +
+  ylab("") +
+  xlab("") + # Remove o nome do eixo X
+  ggtitle("(A)") +
+  theme_bw() + 
+  theme(
+    axis.title = element_text(size = 10), 
+    axis.text.x = element_text(size = 8),
+    axis.text.y = element_text(face = "italic", size = 8),
+    axis.title.x = element_blank(),  # Remove completamente o título do eixo X
+    legend.position = 'none',
+    plot.margin = unit(c(1, 1, 1, 1), "lines") # Ajuste as margens aqui (topo, direita, baixo, esquerda)
+  )
+
+print(F1)
+
+# plot legend
+F1_legend <- g_legend_phy(F1 + geom_boxplot(aes(color=Outcome,fill=Outcome),alpha=0.5)+ 
+                        theme_bw() + theme(axis.title = element_text(size = 10), 
+                                           axis.text = element_text(size = 8), 
+                                           axis.text.x=element_blank(), 
+                                           axis.ticks.x=element_blank(), 
+                                           legend.position = 'bottom'))
+
+
+################################################################################################################
+### Sepsis x no_Sepsis composition - Family level
+
+ps_family <- readRDS("ps1.study.family.no.rds")
+
+
+ps_ra_family <- transform_sample_counts(ps_family, function(x) x / sum(x))
+ps_ra_melt_family <- psmelt(ps_ra_family)
+
+
+palette <- c("darkgreen","magenta")
+
+#Legend
+g_legend_family <-function(a.gplot){ 
+  tmp_family <- ggplot_gtable(ggplot_build(a.gplot)) 
+  leg_family <- which(sapply(tmp_family$grobs, function(x) x$name) == "guide-box") 
+  legend_family <- tmp_family$grobs[[leg_family]] 
+  return(legend)} 
+mytheme <- theme(axis.title = element_text(size = 10), axis.text = element_text(size = 8)) + theme_bw()
+
+# Subset
+family.summary_family <- aggregate(Abundance~Outcome+Family, data = ps_ra_melt_family, FUN = mean)
+family.summary.ordered_family <- family.summary_family[order(family.summary_family$Abundance,decreasing = T),]
+
+# Top 10
+family.top.1_family <- family.summary.ordered_family$Family[family.summary.ordered_family$Outcome == "sepsis"][1:5]
+family.top.2_family <- family.summary.ordered_family$Family[family.summary.ordered_family$Outcome == "no_sepsis"][1:5]
+
+# subset 
+top10_family <- unique(c(family.top.1_family,family.top.2_family))
+top10.max_family <- aggregate(Abundance~Family, data = family.summary.ordered_family[family.summary.ordered_family$Family %in% top10_family,], max)
+
+family.keep_family <- top10.max_family$Family[top10.max_family$Abundance>0.01]
+
+# Boxplot top family for Group
+ps_ra_melt_family$Abundance_percent <- ifelse(ps_ra_melt_family$Abundance < 0.001, 0.1,ps_ra_melt_family$Abundance*100)
+
+ps_ra_melt_family$Collection_time_category <- factor(
+  ps_ra_melt_family$Collection_time_category, 
+  levels = c("Before_5_days", "After_5_days")  
+)
+
+
+F2 <- ggplot(ps_ra_melt_family[ps_ra_melt_family$Family %in% family.keep_family,], aes(y = Family, x = Abundance_percent)) + 
+  geom_boxplot(position =position_dodge2(reverse = TRUE), aes(color = Outcome), alpha = 0.5) + 
+  geom_boxplot(position =position_dodge2(reverse = TRUE), aes(fill = Outcome), alpha = 0.5, outlier.shape = 21) +
+  facet_wrap(~ Collection_time_category, nrow = 1) +
+  scale_fill_manual(values = palette) + 
+  scale_color_manual(values = palette) + 
+  scale_x_log10() +
+  ylab("") +
+  xlab("") +
+  ggtitle("(B)") +
+  theme_bw() + theme(axis.title = element_text(size = 10), axis.text.x = element_text(size = 8),legend.position = 'none',axis.text.y = element_text(face="italic",size = 8),
+                     plot.margin = unit(c(1, 1, 1, 1), "lines")) # Ajuste as margens aqui (topo, direita, baixo, esquerda)
+
+print(F2)
+
+# plot legend
+F2_legend <- g_legend_family(F2 + geom_boxplot(aes(color=Outcome,fill=Outcome),alpha=0.5)+ 
+                        theme_bw() + theme(axis.title = element_text(size = 10), 
+                                           axis.text = element_text(size = 8), 
+                                           axis.text.x=element_blank(), 
+                                           axis.ticks.x=element_blank(), 
+                                           legend.position = 'bottom'))
+
+
+######################################################################################################################
+###Sepsis x no_sepsis composition - Genus level
+ps_genus <- readRDS("ps1.study.genus.no.rds")
+
+
+
+ps_ra_genus <- transform_sample_counts(ps_genus, function(x) x / sum(x))
+ps_ra_melt_genus <- psmelt(ps_ra_genus)
+
+palette <- c("darkgreen","magenta")
+
+#Legend
+g_legend_genus <-function(a.gplot){ 
+  tmp_genus <- ggplot_gtable(ggplot_build(a.gplot)) 
+  leg_genus <- which(sapply(tmp_genus$grobs, function(x) x$name) == "guide-box") 
+  legend_genus <- tmp_genus$grobs[[leg_genus]] 
+  return(legend_genus)} 
+mytheme <- theme(axis.title = element_text(size = 10), axis.text = element_text(size = 8)) + theme_bw()
+
+# subset relevant taxa
+genus.summary_genus <- aggregate(Abundance~Outcome+Genus, data = ps_ra_melt_genus, FUN = mean)
+genus.summary.ordered_genus <- genus.summary_genus[order(genus.summary_genus$Abundance,decreasing = T),]
+
+# find top 10 per time point
+genus.top.1_genus <- genus.summary.ordered_genus$Genus[genus.summary.ordered_genus$Outcome == "sepsis"][1:5]
+genus.top.2_genus <- genus.summary.ordered_genus$Genus[genus.summary.ordered_genus$Outcome == "no_sepsis"][1:5]
+
+# subset the ones with mead abundance above 
+top10_genus <- unique(c(genus.top.1_genus,genus.top.2_genus))
+top10.max_genus <- aggregate(Abundance~Genus, data = genus.summary.ordered_genus[genus.summary.ordered_genus$Genus %in% top10_genus,], max)
+genus.keep_genus <- top10.max_genus$Genus[top10.max_genus$Abundance>0.01]
+
+# boxplot top genera by group
+ps_ra_melt_genus$Abundance_percent <- ifelse(ps_ra_melt_genus$Abundance < 0.001, 0.1,ps_ra_melt_genus$Abundance*100)
+
+ps_ra_melt_genus$Collection_time_category <- factor(
+  ps_ra_melt_genus$Collection_time_category, 
+  levels = c("Before_5_days", "After_5_days")  
+)
+
+F4 <- ggplot(ps_ra_melt_genus[ps_ra_melt_genus$Genus %in% genus.keep_genus,], aes(y = Genus, x = Abundance_percent)) + 
+  geom_boxplot(position =position_dodge2(reverse = TRUE), aes(color = Outcome), alpha = 0.5) + 
+  geom_boxplot(position =position_dodge2(reverse = TRUE), aes(fill = Outcome), alpha = 0.5, outlier.shape = 21) +
+  facet_wrap(~ Collection_time_category, nrow = 1) +
+  scale_fill_manual(values = palette) + 
+  scale_color_manual(values = palette) + 
+  scale_x_log10() +
+  ylab("") +
+  xlab("") +
+  ggtitle("(C)") +
+  theme_bw() + theme(axis.title = element_text(size = 10), axis.text.x = element_text(size = 8),legend.position = 'none',axis.text.y = element_text(face="italic",size = 8),
+                     plot.margin = unit(c(1, 1, 1, 1), "lines")) # Ajuste as margens aqui (topo, direita, baixo, esquerda)
+
+
+print(F4)
+
+
+# plot legend
+F4_legend <- g_legend_genus(F4 + geom_boxplot(aes(color=Outcome,fill=Outcome),alpha=0.5)+ 
+                              theme_bw() + theme(axis.title = element_text(size = 10), 
+                                                 axis.text = element_text(size = 8), 
+                                                 axis.text.x=element_blank(), 
+                                                 axis.ticks.x=element_blank(), 
+                                                 legend.position = 'bottom'))
+
+
+# clean environment
+rm(list = ls(all = TRUE))
+```
+
+# 4.0 Alpha diversity
+```{r alpha_a,eval=TRUE, echo=F, fig.cap='Figure : Boxplot of alpha diversity - Shannon diversity index by Group'}
+path <- '/home/local.hcpa.ufrgs.br/rrguerra/study_2'
+alpha_div = paste(path,"/alpha_div/",sep = "")
+dir.create(alpha_div)
+
+
+ps <- readRDS("ps1.study.no.rds")
+
+
+palette <- c("darkgreen","magenta")
+
+#Legend
+g_legend<-function(a.gplot){ 
+  tmp <- ggplot_gtable(ggplot_build(a.gplot)) 
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box") 
+  legend <- tmp$grobs[[leg]] 
+  return(legend)} 
+
+mytheme <- theme(axis.title = element_text(size = 10), axis.text = element_text(size = 8)) + theme_bw()
+
+#theme(axis.text.x = element_text(angle = 45, hjust = 1)
+
+# Alpha diversity
+df.adiv <- cbind(data.frame(sample_data(ps)), estimate_richness(ps, measures = c("Shannon")))
+
+# Summarize for group
+
+df.adiv.summary <- df.adiv %>%
+  group_by(Outcome, Collection_time_category) %>%
+  summarise(
+    n = n(),
+    Shannon_mean = mean(Shannon, na.rm = TRUE),
+    Shannon_sd = sd(Shannon, na.rm = TRUE)
+  )
+
+# Save Summary Table (CSV & Excel)
+write.csv(df.adiv.summary, file.path(alpha_div, "alpha_diversity_summary_outcome.csv"), row.names = FALSE)
+write.xlsx(df.adiv.summary, file.path(alpha_div, "alpha_diversity_summary_outcome.xlsx"), rowNames = FALSE)
+
+#  Statistical Tests (Wilcoxon/Kruskal-Wallis)
+## For each time )before and after 5 days)
+df_T1 <- df.adiv %>% filter(Collection_time_category == "Before_5_days")
+df_T2 <- df.adiv %>% filter(Collection_time_category == "After_5_days")
+
+# Wilcoxon test for T1
+teste_T1 <- wilcox.test(Shannon ~ Outcome, data = df_T1)
+
+# Wilcoxon test for T2
+teste_T2 <- wilcox.test(Shannon ~ Outcome, data = df_T2)
+
+# results
+teste_T1$p.value
+teste_T2$p.value
+
+#Save statistical tests
+results_pval <- data.frame(
+  Time = c("T1", "T2"),
+  p_value = c(teste_T1$p.value, teste_T2$p.value)
+)
+
+write_xlsx(results_pval, path = "statistical_results_shannon.xlsx")
+
+# Reorder levels in Collection time category for plot
+df.adiv$Collection_time_category <- factor(
+  df.adiv$Collection_time_category,
+  levels = c("Before_5_days", "After_5_days")
+)
+
+############################### Fig Alpha Div (Shannon) - Plot ###################################################
+F8 <- ggplot(df.adiv, aes(x = Outcome, y = Shannon)) + 
+  # Boxplot layers with transparency and fill
+  geom_boxplot(aes(color = Outcome), alpha = 0.5, outlier.shape = 21) +
+  geom_boxplot(aes(fill = Outcome), outlier.shape = 21, alpha = 0.2) +
+  # Manual color and fill palettes
+  scale_fill_manual(values = palette) +
+  scale_color_manual(values = palette) +
+  # Faceting by collection time
+  facet_wrap(~ Collection_time_category, nrow = 1) +
+  # Add t-test comparison
+  stat_compare_means(method = "wilcox.test", label = "p.format", 
+                     label.y = max(df.adiv$Shannon) + 0.5) +
+  # Axis labels
+  ylab("Shannon diversity index") + 
+  xlab("Outcome") +
+  # Theme adjustments
+  theme_bw() + 
+  theme(
+    axis.title = element_text(size = 10),
+    axis.text = element_text(size = 8),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+    # Uncomment if you want to remove the legend:
+    # legend.position = 'none'
+  )
+
+print(F8)
+
+# clean environment
+#rm(list = ls(all = TRUE))
+
+```
+
+## 4.1 Linear modeling for alpha diversity
+```{r alpha_b,eval=TRUE, echo=F}
+set.seed(123)
+# Defining variables
+df.adiv <- df.adiv %>%
+  mutate(
+    Outcome = factor(Outcome),
+    Sex = factor(Sex),
+    Collection_time_category = factor(Collection_time_category)
+  )
+
+df.adiv$Outcome <- relevel(df.adiv$Outcome, ref = "no_sepsis")
+
+# LM model
+modelo <- lm(Shannon ~ Outcome + Sex + Age + SOFA + Collection_time + Collection_time_category + ATB_days,
+             data = df.adiv)
+
+# Summary model 
+modelo_summary <- tidy(modelo, conf.int = TRUE) %>% 
+  mutate(p.value = ifelse(p.value < 0.001, "<0.001", round(p.value, 3)))
+
+# Summary model table
+modelo_summary %>%
+  kable(digits = 3, caption = "Linear Model Summary") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+
+write.csv(modelo_summary, "modelo_summary_all_samples.csv", row.names = FALSE)
+
+# Model diagnostics – Residual Plots
+# Set up the diagnostic plots
+diagnostico <- autoplot(modelo, which = 1:4, colour = "blue") + 
+  theme_minimal()
+
+print(diagnostico)
+
+# Normality test of residuals
+teste_normalidade <- shapiro.test(residuals(modelo))
+
+##############################LM for each time###################################################################
+# For T1
+model_T1 <- lm(Shannon ~ Outcome + Sex + Age + SOFA + Collection_time + ATB_days, data = df_T1)
+
+# For T2
+model_T2 <- lm(Shannon ~ Outcome + Sex + Age + SOFA + Collection_time + ATB_days, data = df_T2)
+
+# Summary model T1
+model_summary_T1 <- tidy(model_T1, conf.int = TRUE) %>% 
+  mutate(p.value = ifelse(p.value < 0.001, "<0.001", round(p.value, 3)))
+
+model_summary_T1 %>%
+  kable(digits = 3, caption = "Linear Model Summary") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+
+write.csv(model_summary_T1, "model_summary_T1.csv", row.names = FALSE)
+
+# Summary model T2
+model_summary_T2 <- tidy(model_T2, conf.int = TRUE) %>% 
+  mutate(p.value = ifelse(p.value < 0.001, "<0.001", round(p.value, 3)))
+
+model_summary_T2 %>%
+  kable(digits = 3, caption = "Linear Model Summary") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+
+write.csv(model_summary_T2, "model_summary_T2.csv", row.names = FALSE)
+
+####################################################################################################################
+#There is no normality in the residuals using the lm model, so I will use a Gamma glm instead.
+modelo_glm <- glm(Shannon ~ Outcome + Age + Sex + Collection_time + ATB_days, data = df.adiv, family = Gamma())
+
+# Summary model 
+modelo_summary_glm <- tidy(modelo_glm, conf.int = TRUE) %>% 
+  mutate(p.value = ifelse(p.value < 0.001, "<0.001", round(p.value, 3)))
+
+# Summary model table
+modelo_summary_glm %>%
+  kable(digits = 3, caption = "General Linear Model Summary") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+
+write.csv(modelo_summary_glm, "General_model_summary_all_samples.csv", row.names = FALSE)
+
+# Model diagnostics – Residual Plots
+# Set up the diagnostic plots
+diagnostico_glm <- autoplot(modelo_glm, which = 1:4, colour = "blue") + 
+  theme_minimal()
+
+print(diagnostico_glm)
+
+#Residuo deviance
+deviance_residuos <- residuals(modelo_glm, type = "deviance")
+print(deviance_residuos)
+
+##################################GLM model for each time########################################
+#Model for each time
+# For T1
+model_glm_T1 <- glm(Shannon ~ Outcome + Sex + Age + SOFA + Collection_time + ATB_days, data = df_T1, family = Gamma())
+
+# For T2
+model_glm_T2 <- glm(Shannon ~ Outcome + Sex + Age + SOFA + Collection_time + ATB_days, data = df_T2, family = Gamma())
+
+# Summary model T1
+model_glm_summary_T1 <- tidy(model_glm_T1, conf.int = TRUE) %>% 
+  mutate(p.value = ifelse(p.value < 0.001, "<0.001", round(p.value, 3)))
+
+model_glm_summary_T1 %>%
+  kable(digits = 3, caption = "General Linear Model Summary T1") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+
+write.csv(model_glm_summary_T1, "general_model_T1.csv", row.names = FALSE)
+
+# Summary model T2
+model_glm_summary_T2 <- tidy(model_glm_T2, conf.int = TRUE) %>% 
+  mutate(p.value = ifelse(p.value < 0.001, "<0.001", round(p.value, 3)))
+
+model_glm_summary_T2 %>%
+  kable(digits = 3, caption = "General Linear Model Summary T2") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+
+write.csv(model_glm_summary_T2, "general_model_T2.csv", row.names = FALSE)
+
+#clean environment
+rm(list = ls(all = TRUE))
+```
+
+# 5.0 Beta diversity and Clustering
+## 5.1 Preparing and evaluating the data
+```{r tsc_data_prep, eval=T, echo=F}
+path <- '/home/local.hcpa.ufrgs.br/rrguerra/study_2'
+Clustering <- file.path(path, "Clustering")
+dir.create(Clustering, showWarnings = FALSE)
+
+ps <- readRDS("ps1.study.no.rds")
+
+seq_counts <- as.data.frame(t(otu_table(ps)))
+tax_key <- as.data.frame(tax_table(ps))
+
+covariance_matrix <- as.matrix(seq_counts) %*% t(seq_counts)
+
+cov_determinant <- det(covariance_matrix)
+
+cat("Determinant of covariance matrix (original count data):", cov_determinant, "\n")
+
+# Approach: Logarithmic Ratio Transformations for PCA with Compositional Data
+# Apply the isometric logarithmic ratio (ILR) transformation
+log_rats <- data.frame(compositions::ilr(t(seq_counts)))
+
+# Evaluate the determinant of the transformed covariance matrix
+new_covdet <- det(as.matrix(log_rats) %*% t(log_rats))
+
+cat("Determinant of covariance matrix (after ILR transformation):", new_covdet, "\n")
+
+# Comparison:
+# - Original count data: Determinant = 0 (singular matrix).
+# - After ILR transformation: Determinant > 0 (invertible matrix).
+
+# Perform PCA on logarithmic ratio transformed data
+lograt_pca <- prcomp(log_rats)
+```
+
+## 5.2 Log-Ratio PCA Screeplot
+```{r lrpca_scree, eval=T, echo=F}
+# Cheking
+lograt_variances <-lograt_pca$sdev^2/sum(lograt_pca$sdev^2)
+
+barplot(lograt_variances,
+        main='Log-Ratio PCA Screeplot',
+        xlab='PC Axis',
+        ylab='% Variance',
+       col=c(rep('black',3),rep('grey',40)), 
+       cex.names=1.5,cex.axis=1.5,cex.lab=1.5,cex.main=1.5)
+legend('topright',fill=c('black','grey'),c('Should Present','??? Judgment Call'))
+```
+
+## 5.3 Log-ratio PCA
+```{r lrpca_group1, eval=T, echo=F}
+samdf <- microbiome::meta(ps)
+
+#Dffor PCA
+pca_lograt_frame<-data.frame(lograt_pca$x,
+                          Outcome=cbind(as.character(samdf$Outcome)))
+                          
+
+palette <- c("darkgreen","magenta")
+
+#Plot
+lrpca <- ggplot(pca_lograt_frame) +
+  geom_point(aes(x = PC1, y = PC2, col = Outcome)) +
+  ylab(paste0('PC2 ', round(lograt_variances[2] * 100, 2), '%')) +
+  xlab(paste0('PC1 ', round(lograt_variances[1] * 100, 2), '%')) +
+  scale_color_manual(values = palette, name = 'Outcome') +
+  ggtitle('Log-Ratio PCA Ordination - Outcome') +
+  coord_fixed(ratio = lograt_variances[2] / lograt_variances[1]) +
+  theme_bw()
+
+
+FileName <- paste(Clustering,"/Log-Ratio PCA Ordination.pdf", sep = "")
+ggsave(FileName, plot = lrpca, width = 180, height = 170, units = "mm", dpi = 300)
+
+
+FileName <- paste(Clustering,"/Log-Ratio PCA Ordination.png", sep = "")
+ggsave(FileName, plot = lrpca, width = 180, height = 170, units = "mm", dpi = 300)
+
+
+pca_lograt_frame <- cbind(SampleID = samdf$SampleID, pca_lograt_frame)
+FileName <- paste(Clustering,"/Log-ratio PCA.xlsx", sep = "")
+write_xlsx(pca_lograt_frame,FileName)
+
+# Plot
+lrpca
+```
+
+## 5.4 PCoA on Jaccard Distance - Scree plot
+```{r pcoa_jac_scree, eval=T, echo=F}
+# Computing distances
+jac_dmat<-vegdist(t(seq_counts),method="jaccard")
+
+# PCoA
+pcoa_jac<-ape::pcoa(jac_dmat)
+
+samp_no<-dim(seq_counts)[2]
+jac_variances<-pcoa_jac$values$Relative_eig
+par(mar=c(5,6,4,1)+.1)
+barplot(jac_variances,
+        xlab='Principal Coordinate Axis',
+        ylab='% Variance',
+       col=c(rep('black',3),'darkgrey',rep('lightgrey',87)),
+       cex.names=2,cex.axis=2,cex.lab=2,cex.main=1,
+       names.arg=as.character(1:87)) #número de axis
+legend('topright',fill=c('black','darkgrey','lightgrey'),c('Should Present','Judgment Call','Unnecessary to Present'), cex=2)
+
+
+```
+
+## 5.5 PCoA on Aitchison Distance - Screen plot
+```{r pcoa_euc_scree, eval=T, echo=F}
+euc_dmat<-dist(log_rats)
+
+pcoa_euc<-ape::pcoa(euc_dmat)
+euc_variances<-pcoa_euc$values$Relative_eig
+par(mar=c(5,6,4,1)+.1)
+barplot(euc_variances,
+        xlab='Principal Coordinate Axis',
+        ylab='% Variance',
+       col=c(rep('black',3),'darkgrey',rep('lightgrey',87)),
+       cex.names=2,cex.axis=2,cex.lab=2,cex.main=1,
+       names.arg=as.character(1:87)) #número de axis
+legend('topright',fill=c('black','darkgrey','lightgrey'),c('Should Present','Judgment Call','Unnecessary'),cex=2)
+```
+
+##  5.6 PCoA - Jaccard
+```{r pcoa_jac, eval=T, echo=F}
+#2D
+# Convert data to a dataframe
+pcoa_jac_frame <- data.frame(pcoa_jac$vectors, Outcome = as.character(samdf$Outcome))
+
+# Compute eigenvalues for axis labels
+eigenvalues <- round(jac_variances, 4) * 100
+
+# Create the PCoA plot
+pcoa_jac_fig <- ggplot(pcoa_jac_frame, aes(x = Axis.2, y = Axis.1, color = Outcome)) +
+  geom_point(size = 1) + 
+  stat_ellipse(aes(color = Outcome), type = "t", linewidth = 0.5, linetype = 2) +# Adjust point size and transparency
+  scale_color_manual(values = palette, name = "Outcome") +  # Use custom palette
+  labs(x = paste0("PCoA Axis 2 (", eigenvalues[2], "%)"),
+       y = paste0("PCoA Axis 1 (", eigenvalues[1], "%)")) +  # Correctly set axis labels
+  ggtitle("(C)") +
+  theme_bw() +
+  theme(legend.position = 'right') 
+    
+
+pcoa_jac_fig
+
+#Save
+FileName <- paste(Clustering,"/PCoA Jaccard.pdf", sep = "")
+ggsave(FileName, plot = pcoa_jac_fig, width = 180, height = 170, units = "mm", dpi = 300)
+
+FileName <- paste(Clustering,"/PCoA Jaccard.png", sep = "")
+ggsave(FileName, plot = pcoa_jac_fig, width = 180, height = 170, units = "mm", dpi = 300)
+
+pcoa_jac_fig <- cbind(SampleID = samdf$SampleID, pcoa_jac_fig)
+FileName <- paste(Clustering,"/PCoA Jaccard.xlsx", sep = "")
+write_xlsx(pcoa_jac_frame,FileName)
+```
+
+## 5.7 PCoA - Aitchison
+```{r pcoa_eu_ex, eval=T, echo=F}
+#2D
+
+pcoa_euc_frame <- data.frame(pcoa_euc$vectors, Outcome = as.character(samdf$Outcome))
+
+# Compute eigenvalues for axis labels
+euc_eigenvalues <- round(euc_variances, 4) * 100
+
+# Create the PCoA plot (2D version)
+pcoa_euc_fig <- ggplot(pcoa_euc_frame, aes(x = Axis.2, y = Axis.1, color = Outcome)) +
+  geom_point(size = 1) + 
+  stat_ellipse(aes(color = Outcome), type = "t", size = 0.5, linetype = 2) + # Adjust point size and transparency
+  scale_color_manual(values = palette, name = "Outcome") +  # Use custom palette
+  labs(x = paste0("PCoA Axis 2 (", euc_eigenvalues[2], "%)"),
+       y = paste0("PCoA Axis 1 (", euc_eigenvalues[1], "%)")) +  # Keep axis labels in labs()
+  ggtitle("(A)") + 
+  theme_bw() +
+  theme(legend.position = "right")
+
+
+pcoa_euc_fig
+
+
+#Save
+FileName <- paste(Clustering,"/PCoA Aitchison.pdf", sep = "")
+ggsave(FileName, plot = pcoa_euc_fig, width = 180, height = 170, units = "mm", dpi = 300)
+
+
+FileName <- paste(Clustering,"/PCoA Aitchison.png", sep = "")
+ggsave(FileName, plot = pcoa_euc_fig, width = 180, height = 170, units = "mm", dpi = 300)
+
+
+pca_lograt_frame <- cbind(SampleID = samdf$SampleID, pca_lograt_frame)
+FileName <- paste(Clustering,"/PCoA Aitchison.xlsx", sep = "")
+write_xlsx(pca_lograt_frame,FileName)
+```
+
+## 5.8 Hierarchical clustering - Jaccard
+```{r hclust_jac, eval=T, echo=F}
+cluster_ex<-hclust(vegdist(t(seq_counts),method='jaccard'),method="complete")
+plot(cluster_ex,main='Jaccard Hierarchical Agglomerative Clustering',xlab='',sub='')
+```
+
+## 5.9 Non-metric Multidimensional Scaling (NMDS)
+```{r nmds, eval=T, echo=F}
+set.seed(123) 
+
+euc_nmds<-metaMDS(euc_dmat,k=4,autotransform=FALSE)
+jac_nmds<-metaMDS(jac_dmat,k=4,autotransform=FALSE)
+
+euc_nmds$stress 
+jac_nmds$stress
+```
+
+### 5.9.1 NMDS on Jaccard and Aitchison Distances
+```{r nmds_plot_ex, eval=T, echo=F}
+euc_frame <-data.frame(euc_nmds$points, Outcome=cbind(as.character(samdf$Outcome)))
+jac_frame <-data.frame(jac_nmds$points, Outcome=cbind(as.character(samdf$Outcome)))
+
+# NMDS Aitchison distance
+euc_fig <- ggplot(euc_frame, aes(x = MDS1, y = MDS2, group = Outcome)) +
+  geom_point(aes(col = Outcome),  size = 1) +
+  stat_ellipse(aes(color = Outcome), type = "t", size = 0.5, linetype = 2) +# Cor por group
+  scale_color_manual(values = palette, name = 'Outcome') +  # Paleta de cores
+  theme_bw() +
+  theme(legend.position = 'right') +
+  xlab('NMDS 1') + ylab('NMDS 2') +
+  ggtitle('(B)')
+
+
+# NMDS Jaccard distance
+jac_fig <- ggplot(jac_frame, aes(x = MDS1, y = MDS2, group = Outcome)) +
+  geom_point(aes(col = Outcome), size = 1) +  # Cor por group
+  stat_ellipse(aes(color = Outcome), type = "t", size = 0.5, linetype = 2) +
+  scale_color_manual(values = palette, name = 'Outcome') +  # Paleta de cores
+  theme_bw() +
+  theme(legend.position = 'right') +
+  xlab('NMDS 1') + ylab('NMDS 2') +
+  ggtitle('(D)')
+
+euc_fig
+jac_fig
+```
+
+## 5.10 Betadispersion
+```{r beta_disper_a, eval=F, echo=F}
+
+df <- microbiome::meta(ps)
+
+# Beta diversity dispersion
+beta.disp <- betadisper(euc_dmat, df$Outcome)
+anova(beta.disp)
+```
+
+## 5.11 PERMANOVA
+### 5.11.1 PERMANOVA for Aitchison distance and Group variable
+```{r permanova_ait,eval=T, echo=F}
+set.seed(1234) 
+perm <- with(samdf, how(nperm = 999))
+adonis2(euc_dmat ~ Outcome , data = samdf, permutations = perm)
+adonis2(euc_dmat ~ Age, data = samdf, permutations = perm)
+adonis2(euc_dmat ~ Sex, data = samdf, permutations = perm)
+adonis2(euc_dmat ~ Collection_time, data = samdf, permutations = perm)
+adonis2(euc_dmat ~ Stay_days, data = samdf, permutations = perm)
+adonis2(euc_dmat ~ ATB_days, data = samdf, permutations = perm)
+adonis2(euc_dmat ~ SOFA, data = samdf, permutations = perm)
+
+variables <- c("Outcome", "Age", "Sex", "Collection_time", "Stay_days", "ATB_days", "SOFA")
+adonis_results <- data.frame(Variable = character(),
+                             Df = numeric(),
+                             SumOfSqs = numeric(),
+                             R2 = numeric(),
+                             F_value = numeric(),
+                             p_value = numeric(),
+                             stringsAsFactors = FALSE)
+for (var in variables) {
+  formula <- as.formula(paste("euc_dmat ~", var))
+  res <- adonis2(formula, data = samdf, permutations = perm)
+  adonis_results <- rbind(adonis_results, data.frame(
+    Variable = var,
+    Df = res$Df[1],
+    SumOfSqs = res$SumOfSqs[1],
+    R2 = res$R2[1],
+    F_value = res$F[1],
+    p_value = res$`Pr(>F)`[1]
+  ))
+}
+
+print(adonis_results)
+write_csv(adonis_results, "adonis2_results_Aitchison.csv")
+```
+
+### 5.11.2 PERMANOVA for Jaccard distance and Group variable
+```{r permanova_jac,eval=T, echo=F}
+set.seed(1234) 
+perm <- with(samdf, how(nperm = 999))
+adonis2(jac_dmat ~ Outcome, data = samdf, permutations = perm)
+
+variables <- c("Outcome", "Age", "Sex", "Collection_time", "Stay_days", "ATB_days", "SOFA")
+adonis_results <- data.frame(Variable = character(),
+                             Df = numeric(),
+                             SumOfSqs = numeric(),
+                             R2 = numeric(),
+                             F_value = numeric(),
+                             p_value = numeric(),
+                             stringsAsFactors = FALSE)
+for (var in variables) {
+  formula <- as.formula(paste("jac_dmat ~", var))
+  res <- adonis2(formula, data = samdf, permutations = perm)
+  adonis_results <- rbind(adonis_results, data.frame(
+    Variable = var,
+    Df = res$Df[1],
+    SumOfSqs = res$SumOfSqs[1],
+    R2 = res$R2[1],
+    F_value = res$F[1],
+    p_value = res$`Pr(>F)`[1]
+  ))
+}
+
+print(adonis_results)
+write_csv(adonis_results, "adonis2_results_jaccard.csv")
+
+# clean environment
+rm(list = ls(all = TRUE))
+```
