@@ -1,6 +1,6 @@
 ---
 title: "IDENTIFICATION AND CHARACTERIZATION OF GUT MICROBIOME IN PATIENTS WITH SIRS AND SEPSIS "
-author: "Rafaela Ramalho Guerra"
+author: "Ramalho"
 date: "`r Sys.Date()`"
 ---
 
